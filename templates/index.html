@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Weather Agent - {{.City}}, {{.Country}}</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Weather in {{.City}}, {{.Country}}</h1>
+            <p class="timestamp">Last updated: {{.Timestamp}}</p>
+            
+            <!-- <div class="location-form">
+                <form action="/api/update-city" method="POST">
+                    <input type="text" name="city" placeholder="City" required>
+                    <input type="text" name="country" placeholder="Country Code (optional)">
+                    <button type="submit">Update Location</button>
+                </form>
+            </div> -->
+        </header>
+        
+        <div class="weather-message" id="weatherMessage">
+            <p>{{.Message}}</p>
+        </div>
+        
+        <div class="weather-details" id="weatherDetails">
+            <div class="loading">Loading weather details...</div>
+        </div>
+        
+        <div class="refresh-container">
+            <button id="refreshButton" class="refresh-button">
+                <i class="fas fa-sync-alt"></i> Refresh Now
+            </button>
+            <p class="refresh-note">Auto-refreshes every minute</p>
+        </div>
+        
+        <footer>
+            <p>Powered by Weather Agent with Claude</p>
+        </footer>
+    </div>
+    
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

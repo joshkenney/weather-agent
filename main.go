@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -289,7 +291,13 @@ func (agent *WeatherAgent) fetchWeather() (WeatherResponse, error) {
 		return WeatherResponse{}, err
 	}
 
-	// Parse the local time from the API response - handle both formats
+	// Parse the local time from the API response and apply timezone
+	// Open-Meteo returns time in local timezone, but Go parses it as if it's in server timezone
+	// We need to create the proper timezone location first
+
+	// Create a fixed offset timezone based on the API's timezone offset
+	locationTimezone := time.FixedZone("Local", openMeteoResp.TimezoneOffset)
+
 	var localTime time.Time
 	timeFormats := []string{
 		time.RFC3339,       // Try full RFC3339 format first: "2006-01-02T15:04:05Z07:00"
@@ -299,15 +307,23 @@ func (agent *WeatherAgent) fetchWeather() (WeatherResponse, error) {
 
 	var parseErr error
 	for _, format := range timeFormats {
-		localTime, parseErr = time.Parse(format, openMeteoResp.Current.Time)
-		if parseErr == nil {
-			break // Successfully parsed
+		// Parse the time and interpret it as being in the location's timezone
+		parsedTime, err := time.Parse(format, openMeteoResp.Current.Time)
+		if err == nil {
+			// Convert the parsed time to be in the correct timezone
+			localTime = time.Date(
+				parsedTime.Year(), parsedTime.Month(), parsedTime.Day(),
+				parsedTime.Hour(), parsedTime.Minute(), parsedTime.Second(),
+				parsedTime.Nanosecond(), locationTimezone)
+			parseErr = nil
+			break
 		}
+		parseErr = err
 	}
 
 	if parseErr != nil {
 		// Fall back to current time if parsing fails
-		localTime = time.Now()
+		localTime = time.Now().In(locationTimezone)
 		agent.logger.Printf("Failed to parse time from API: %v (time string: '%s'). Using current time.",
 			parseErr, openMeteoResp.Current.Time)
 	}
@@ -363,8 +379,8 @@ func (agent *WeatherAgent) fetchWeather() (WeatherResponse, error) {
 		}{
 			Country: agent.config.CountryCode,
 		},
-		Dt:       localTime.Unix(),             // Local time from API
-		Timezone: openMeteoResp.TimezoneOffset, // Timezone offset in seconds
+		Dt:       localTime.Unix(),             // Time in correct timezone
+		Timezone: openMeteoResp.TimezoneOffset, // Store timezone offset for reference
 	}
 
 	// Debug timezone information
@@ -478,19 +494,25 @@ func (agent *WeatherAgent) getWindUnit() string {
 
 // Prepare weather data for LLM
 // Update prepareWeatherData to include day/night information
+// Modify the prepareWeatherData method to fix the time display
+// Modify the prepareWeatherData method to be extremely explicit about time
 func (agent *WeatherAgent) prepareWeatherData(weather WeatherResponse) map[string]interface{} {
-	// Parse the time from the Unix timestamp using the timezone offset
-	localTime := time.Unix(weather.Dt, 0)
+	// Create the timezone for the location
+	locationTimezone := time.FixedZone("Local", weather.Timezone)
+	// Convert the stored Unix timestamp to the proper timezone
+	localTime := time.Unix(weather.Dt, 0).In(locationTimezone)
 
 	// Get sunrise/sunset in local time if available
 	var sunrise, sunset string
 	if weather.Sys.Sunrise > 0 {
-		sunriseTime := time.Unix(weather.Sys.Sunrise, 0)
-		sunrise = sunriseTime.Format("15:04")
+		// Convert sunrise to location timezone
+		sunriseTime := time.Unix(weather.Sys.Sunrise, 0).In(locationTimezone)
+		sunrise = sunriseTime.Format("3:04 PM")
 	}
 	if weather.Sys.Sunset > 0 {
-		sunsetTime := time.Unix(weather.Sys.Sunset, 0)
-		sunset = sunsetTime.Format("15:04")
+		// Convert sunset to location timezone
+		sunsetTime := time.Unix(weather.Sys.Sunset, 0).In(locationTimezone)
+		sunset = sunsetTime.Format("3:04 PM")
 	}
 
 	// Weather condition
@@ -504,28 +526,44 @@ func (agent *WeatherAgent) prepareWeatherData(weather WeatherResponse) map[strin
 	// Determine if it's day or night based on the time
 	hour := localTime.Hour()
 	isDaytime := hour >= 6 && hour < 20 // Simple approximation if we don't have actual sunrise/sunset
+	dayNightString := "DAYTIME"
+	if !isDaytime {
+		dayNightString = "NIGHTTIME"
+	}
+
+	// Format times in multiple ways for absolute clarity
+	time12h := localTime.Format("3:04 PM")
+	time24h := localTime.Format("15:04")
+	timeWithSeconds := localTime.Format("3:04:05 PM")
+	fullTimeDate := localTime.Format("Monday, January 2, 2006 at 3:04 PM")
 
 	// Create a map of the current weather data
 	data := map[string]interface{}{
-		"city":            weather.Name,
-		"country":         weather.Sys.Country,
-		"time":            localTime.Format("15:04"),
-		"date":            localTime.Format("2006-01-02"),
-		"day_of_week":     localTime.Weekday().String(),
-		"temperature":     fmt.Sprintf("%.1f%s", weather.Main.Temp, agent.getTempUnit()),
-		"feels_like":      fmt.Sprintf("%.1f%s", weather.Main.FeelsLike, agent.getTempUnit()),
-		"condition":       condition,
-		"description":     description,
-		"humidity":        weather.Main.Humidity,
-		"wind_speed":      fmt.Sprintf("%.1f %s", weather.Wind.Speed, agent.getWindUnit()),
-		"wind_direction":  weather.Wind.Deg,
-		"visibility":      weather.Visibility,
-		"sunrise":         sunrise,
-		"sunset":          sunset,
-		"units":           agent.config.Units,
-		"is_daytime":      isDaytime,
-		"local_time":      localTime.Format(time.RFC3339),
-		"timezone_offset": weather.Timezone,
+		"city":                  weather.Name,
+		"country":               weather.Sys.Country,
+		"current_local_time":    time12h + " (" + time24h + " in 24-hour format)",
+		"time_12h":              time12h,
+		"time_24h":              time24h,
+		"time_with_seconds":     timeWithSeconds,
+		"full_date_and_time":    fullTimeDate,
+		"day_of_week":           localTime.Weekday().String(),
+		"hour_of_day":           hour,
+		"is_daytime_or_night":   dayNightString,
+		"date":                  localTime.Format("January 2, 2006"),
+		"temperature":           fmt.Sprintf("%.1f%s", weather.Main.Temp, agent.getTempUnit()),
+		"feels_like":            fmt.Sprintf("%.1f%s", weather.Main.FeelsLike, agent.getTempUnit()),
+		"condition":             condition,
+		"description":           description,
+		"humidity":              weather.Main.Humidity,
+		"wind_speed":            fmt.Sprintf("%.1f %s", weather.Wind.Speed, agent.getWindUnit()),
+		"wind_direction":        weather.Wind.Deg,
+		"visibility":            weather.Visibility,
+		"sunrise":               sunrise,
+		"sunset":                sunset,
+		"units":                 agent.config.Units,
+		"is_daytime":            isDaytime,
+		"timezone_offset_hours": weather.Timezone / 3600,
+		"timezone_name":         fmt.Sprintf("UTC%+d", weather.Timezone/3600),
 	}
 
 	// Add rain data if available
@@ -544,16 +582,60 @@ func (agent *WeatherAgent) prepareWeatherData(weather WeatherResponse) map[strin
 		data["snow_3h"] = weather.Snow.ThreeHours
 	}
 
+	// Time display for UI - ensure we have a time field specifically for the UI
+	data["time"] = time12h // This is what displays in the UI
+
+	// Log all time-related fields for debugging
+	agent.logger.Printf("TIME FIELDS FOR UI:")
+	agent.logger.Printf("time: %s", data["time"])
+	agent.logger.Printf("time_12h: %s", data["time_12h"])
+	agent.logger.Printf("time_24h: %s", data["time_24h"])
+	agent.logger.Printf("current_local_time: %s", data["current_local_time"])
+
 	return data
 }
 
 // Generate message using LLM API
+// Modify the generateLLMMessage function to explicitly address the time issue
+// Add this to the beginning of the generateLLMMessage function
 func (agent *WeatherAgent) generateLLMMessage(currentWeather WeatherResponse, historyContext string) (string, error) {
+	// Debug the timestamp and timezone before any processing
+	agent.logger.Printf("======= LLM MESSAGE TIME DEBUG =======")
+	agent.logger.Printf("Unix timestamp: %d", currentWeather.Dt)
+	agent.logger.Printf("Timezone offset: %d seconds (%d hours)",
+		currentWeather.Timezone, currentWeather.Timezone/3600)
+
+	// Create timezone and get local time
+	locationTimezone := time.FixedZone("Local", currentWeather.Timezone)
+	localTime := time.Unix(currentWeather.Dt, 0).In(locationTimezone)
+	agent.logger.Printf("LOCAL TIME (in location timezone): %s", localTime.Format("15:04:05 MST"))
+	agent.logger.Printf("==================================")
+
+	// Continue with the rest of the function
 	weatherData := agent.prepareWeatherData(currentWeather)
+	time12h := localTime.Format("3:04 PM")
+	time24h := localTime.Format("15:04")
+
+	// EXPLICITLY force the LLM to understand the correct time
+	timeInstructions := fmt.Sprintf(`IMPORTANT TIME INFORMATION: 
+The CURRENT LOCAL TIME in %s is %s (%s in 24-hour format).
+This is the accurate local time for this location.
+DO NOT convert or adjust this time. It is already the correct local time.
+You MUST use this exact time in your weather message.
+`,
+		currentWeather.Name,
+		time12h,
+		time24h)
 
 	// Convert weatherData to a formatted string
 	var weatherInfo strings.Builder
 	weatherInfo.WriteString("Current Weather Data:\n")
+
+	// Add the explicit time instruction first to emphasize its importance
+	weatherInfo.WriteString(timeInstructions)
+	weatherInfo.WriteString("\n")
+
+	// Add all the weather data
 	for key, value := range weatherData {
 		weatherInfo.WriteString(fmt.Sprintf("%s: %v\n", key, value))
 	}
@@ -564,8 +646,11 @@ func (agent *WeatherAgent) generateLLMMessage(currentWeather WeatherResponse, hi
 		userMessage = userMessage + "\n\nWeather history context:\n" + historyContext
 	}
 
-	// Add instruction for what kind of response we want
-	userMessage += "\n\nBased on this weather data, generate a helpful, informative, and engaging message about the current weather. Make it natural and conversational."
+	// Add VERY explicit instruction for what kind of response we want
+	userMessage += fmt.Sprintf(`
+Based on this weather data, generate a helpful, informative, and engaging message about the current weather. Make it natural and conversational.
+
+CRITICAL: The current local time in %s is %s. DO NOT modify or reinterpret this time. Reference this EXACT time in your response.`, currentWeather.Name, time12h)
 
 	// Call the appropriate LLM API based on configuration
 	switch strings.ToLower(agent.config.LLMProvider) {
@@ -722,7 +807,8 @@ func (agent *WeatherAgent) generateHistoryContext() string {
 
 	// Add the previous weather entry
 	prevWeather := agent.weatherHistory[len(agent.weatherHistory)-2]
-	prevTime := time.Unix(prevWeather.Dt, 0).UTC().Add(time.Second * time.Duration(prevWeather.Timezone))
+	prevLocationTimezone := time.FixedZone("Local", prevWeather.Timezone)
+	prevTime := time.Unix(prevWeather.Dt, 0).In(prevLocationTimezone)
 
 	context.WriteString(fmt.Sprintf("Previous weather (%s):\n", prevTime.Format("15:04")))
 
@@ -911,15 +997,31 @@ func getEnvBool(key string, defaultValue bool) bool {
 	return strings.ToLower(value) == "true" || value == "1"
 }
 
+// Add this function to your WeatherAgent struct
+func (agent *WeatherAgent) debugTimeInfo(weather WeatherResponse) {
+	// Show server's local time zone
+	serverLocation, _ := time.LoadLocation("Local")
+	serverTZ := time.Now().In(serverLocation).Format("MST")
+
+	// Get the local time with proper timezone
+	locationTimezone := time.FixedZone("Local", weather.Timezone)
+	localTime := time.Unix(weather.Dt, 0).In(locationTimezone)
+
+	agent.logger.Printf("======= TIME DEBUG INFO =======")
+	agent.logger.Printf("Server timezone: %s", serverTZ)
+	agent.logger.Printf("Unix timestamp from API: %d", weather.Dt)
+	agent.logger.Printf("Weather location timezone offset: %d seconds (%d hours)", weather.Timezone, weather.Timezone/3600)
+	agent.logger.Printf("Local time at weather location: %s", localTime.Format(time.RFC3339))
+	agent.logger.Printf("==============================")
+}
+
 // Modify the main function to load secrets before config
 func main() {
-	// Try to load secrets from .env file if it exists
+	// Load secrets and config as before
 	loadSecretsFromFile(".env")
-
-	// Load configuration
 	config := loadConfig()
 
-	// Check if LLM API key is set
+	// Check for required API key
 	if config.LLMAPIKey == "" {
 		fmt.Println("LLM API key not set. Please set LLM_API_KEY environment variable or add it to a .env file.")
 		fmt.Println("You can create a .env file with your API key like this:")
@@ -930,20 +1032,141 @@ func main() {
 	// Create our AI agent
 	agent := NewWeatherAgent(config)
 
-	fmt.Printf("Weather LLM Agent started for %s, %s\n", config.City, config.CountryCode)
-	fmt.Printf("LLM Provider: %s (Model: %s)\n", config.LLMProvider, config.LLMModel)
-	fmt.Printf("Check interval: %d minute(s)\n", config.CheckInterval)
-	fmt.Printf("Units: %s\n", config.Units)
+	// Set up a global state to store the latest weather message
+	var latestWeather struct {
+		Message     string
+		City        string
+		Country     string
+		Timestamp   string
+		WeatherData map[string]interface{}
+		sync.RWMutex
+	}
+
+	// Start the weather update goroutine
+	go func() {
+		for {
+			// Get weather update
+			weather, err := agent.fetchWeather()
+			if err != nil {
+				agent.logger.Printf("Error fetching weather: %v", err)
+				time.Sleep(time.Duration(config.CheckInterval) * time.Minute)
+				continue
+			}
+
+			// Generate weather message
+			historyContext := agent.generateHistoryContext()
+			message, err := agent.generateLLMMessage(weather, historyContext)
+			if err != nil {
+				agent.logger.Printf("Error generating LLM message: %v", err)
+				time.Sleep(time.Duration(config.CheckInterval) * time.Minute)
+				continue
+			}
+
+			// Update global state with latest weather info
+			weatherData := agent.prepareWeatherData(weather)
+			timeStr := time.Now().Format(time.RFC1123)
+
+			latestWeather.Lock()
+			latestWeather.Message = message
+			latestWeather.City = config.City
+			latestWeather.Country = config.CountryCode
+			latestWeather.Timestamp = timeStr
+			latestWeather.WeatherData = weatherData
+			latestWeather.Unlock()
+
+			// Log the message as before
+			agent.logger.Printf("[%s] %s\n", time.Now().Format("15:04:05"), message)
+
+			// Wait for next update
+			time.Sleep(time.Duration(config.CheckInterval) * time.Minute)
+		}
+	}()
+
+	// Set up HTTP handlers
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// Serve the main HTML page
+		tmpl, err := template.ParseFiles("templates/index.html")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		latestWeather.RLock()
+		defer latestWeather.RUnlock()
+
+		data := struct {
+			City      string
+			Country   string
+			Message   string
+			Timestamp string
+		}{
+			City:      latestWeather.City,
+			Country:   latestWeather.Country,
+			Message:   latestWeather.Message,
+			Timestamp: latestWeather.Timestamp,
+		}
+
+		tmpl.Execute(w, data)
+	})
+
+	http.HandleFunc("/api/update-city", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		err := r.ParseForm()
+		if err != nil {
+			http.Error(w, "Error parsing form: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		city := r.FormValue("city")
+		country := r.FormValue("country")
+
+		if city == "" {
+			http.Error(w, "City is required", http.StatusBadRequest)
+			return
+		}
+
+		// Update environment variables
+		os.Setenv("WEATHER_CITY", city)
+		if country != "" {
+			os.Setenv("WEATHER_COUNTRY", country)
+		}
+
+		// Redirect back to home page
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+	})
+
+	// In the main HTTP handler, add debugging for the final data sent to the browser
+	http.HandleFunc("/api/weather", func(w http.ResponseWriter, r *http.Request) {
+		// Serve the weather data as JSON for AJAX requests
+		latestWeather.RLock()
+		defer latestWeather.RUnlock()
+
+		// Debug the time data being sent to the browser
+		if latestWeather.WeatherData != nil {
+			log.Printf("TIME DATA SENT TO BROWSER: %v", latestWeather.WeatherData["time"])
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"city":      latestWeather.City,
+			"country":   latestWeather.Country,
+			"message":   latestWeather.Message,
+			"timestamp": latestWeather.Timestamp,
+			"data":      latestWeather.WeatherData,
+		})
+	})
+
+	// Serve static files
+	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
+
+	// Start the HTTP server
+	port := getEnv("PORT", "8080")
+	fmt.Printf("Starting web server at http://localhost:%s\n", port)
 	fmt.Println("Press Ctrl+C to stop")
 
-	// Initial update
-	agent.update()
-
-	// Main monitoring loop
-	ticker := time.NewTicker(time.Duration(config.CheckInterval) * time.Minute)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		agent.update()
-	}
+	http.ListenAndServe(":"+port, nil)
 }
