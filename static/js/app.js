@@ -20,15 +20,8 @@ document.addEventListener("DOMContentLoaded", function () {
     // Track last update timestamp to detect changes
     let lastUpdateTimestamp = "";
 
-    // Fetch weather data when page loads
-    fetchWeatherData().then(() => {
-        // Set up automatic refresh every 15 seconds
-        // This checks more frequently but only updates the UI when there's new data
-        setInterval(() => {
-            console.log("Checking for new weather data...");
-            fetchWeatherData(true);
-        }, 15000); // Check every 15 seconds
-    });
+    // Fetch weather data when page loads only
+    fetchWeatherData();
 
     // Set up manual refresh button if it exists
     const refreshButton = document.getElementById("refreshButton");
@@ -58,6 +51,11 @@ document.addEventListener("DOMContentLoaded", function () {
 
     // Fetch weather data function with silent option
     function fetchWeatherData(silent = false) {
+        // Show loading state unless it's a silent refresh
+        if (!silent) {
+            showLoadingState();
+        }
+
         return fetch("/api/weather")
             .then((response) => {
                 if (!response.ok) {
@@ -99,6 +97,30 @@ document.addEventListener("DOMContentLoaded", function () {
 
     // Add this to the global scope so our interval can use it
     window.fetchWeatherData = fetchWeatherData;
+
+    // Show loading state while fetching weather data
+    function showLoadingState() {
+        const weatherMessage = document.getElementById("weatherMessage");
+        const weatherDetails = document.getElementById("weatherDetails");
+
+        if (weatherMessage) {
+            weatherMessage.innerHTML = `
+                <p class="loading-message">
+                    <i class="fas fa-brain"></i>
+                    Claude is thinking about the weather...
+                </p>
+            `;
+        }
+
+        if (weatherDetails) {
+            weatherDetails.innerHTML = `
+                <div class="loading">
+                    <i class="fas fa-cloud"></i>
+                    Fetching weather data...
+                </div>
+            `;
+        }
+    }
 });
 
 // Shows a subtle indicator that data was refreshed

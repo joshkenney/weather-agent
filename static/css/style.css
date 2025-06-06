@@ -240,3 +240,52 @@ footer {
 .refreshing {
     animation: spin 1s linear infinite;
 }
+
+/* Loading states */
+.loading-message {
+    color: var(--primary-color);
+    font-style: italic;
+    text-align: center;
+    padding: 20px;
+    font-size: 1.1em;
+}
+
+.loading-message i {
+    margin-right: 8px;
+    color: var(--accent-color);
+}
+
+.loading i {
+    margin-right: 8px;
+    color: var(--primary-color);
+}
+
+/* FontAwesome animations */
+.fa-spin {
+    animation: fa-spin 2s infinite linear;
+}
+
+.fa-pulse {
+    animation: fa-pulse 1s infinite;
+}
+
+@keyframes fa-spin {
+    0% {
+        transform: rotate(0deg);
+    }
+    100% {
+        transform: rotate(359deg);
+    }
+}
+
+@keyframes fa-pulse {
+    0% {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.5;
+    }
+    100% {
+        opacity: 1;
+    }
+}
