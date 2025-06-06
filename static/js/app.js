@@ -336,15 +336,29 @@ function updateWeatherDetails(data) {
       label: "Feels Like",
       icon: "fa-thermometer-quarter",
     },
+    { 
+      key: "heat_index",
+      label: "Heat Index",
+      icon: "fa-temperature-high",
+      optional: true 
+    },
     { key: "condition", label: "Condition", icon: "fa-cloud" },
     { key: "humidity", label: "Humidity", icon: "fa-tint", suffix: "%" },
+    { key: "pressure", label: "Pressure", icon: "fa-compress-alt" },
     { key: "wind_speed", label: "Wind", icon: "fa-wind" },
+    { key: "cloud_cover", label: "Cloud Cover", icon: "fa-cloud" },
+    { key: "visibility", label: "Visibility", icon: "fa-eye" },
     { key: "time", label: "Local Time", icon: "fa-clock" },
   ];
 
   // Create weather item elements
   displayItems.forEach((item) => {
-    if (data.data[item.key]) {
+    if (data.data[item.key] || item.optional) {
+      // Skip optional items that don't exist
+      if (item.optional && !data.data[item.key]) {
+        return;
+      }
+      
       const div = document.createElement("div");
       div.className = "weather-item";
 
@@ -379,11 +393,56 @@ function updateWeatherDetails(data) {
 
     const sunriseTime = data.data.sunrise || "N/A";
     const sunsetTime = data.data.sunset || "N/A";
+    const dayLength = data.data.day_length ? `<br>${data.data.day_length}` : '';
 
     div.innerHTML = `
             <i class="fas fa-sun"></i>
             <h3>Sun</h3>
-            <p>↑ ${sunriseTime} <br> ↓ ${sunsetTime}</p>
+            <p>↑ ${sunriseTime} <br> ↓ ${sunsetTime}${dayLength}</p>
+        `;
+    weatherDetails.appendChild(div);
+  }
+  
+  // Add moon phase if available
+  if (data.data.moon_phase) {
+    const div = document.createElement("div");
+    div.className = "weather-item";
+    
+    // Choose moon icon based on phase
+    let moonIcon = "fa-moon";
+    if (data.data.moon_phase.includes("New")) {
+      moonIcon = "fa-moon";
+    } else if (data.data.moon_phase.includes("First Quarter")) {
+      moonIcon = "fa-moon";
+    } else if (data.data.moon_phase.includes("Full")) {
+      moonIcon = "fa-moon";
+    } else if (data.data.moon_phase.includes("Last Quarter")) {
+      moonIcon = "fa-moon";
+    }
+    
+    div.innerHTML = `
+            <i class="fas ${moonIcon}"></i>
+            <h3>Moon</h3>
+            <p>${data.data.moon_phase}</p>
+        `;
+    weatherDetails.appendChild(div);
+  }
+  
+  // Add precipitation data if available
+  if (data.data.rain_1h || data.data.rain_3h || data.data.snow_1h || data.data.snow_3h) {
+    const div = document.createElement("div");
+    div.className = "weather-item";
+    
+    let precipContent = "";
+    if (data.data.rain_1h) precipContent += `Rain (1h): ${data.data.rain_1h}<br>`;
+    if (data.data.rain_3h) precipContent += `Rain (3h): ${data.data.rain_3h}<br>`;
+    if (data.data.snow_1h) precipContent += `Snow (1h): ${data.data.snow_1h}<br>`;
+    if (data.data.snow_3h) precipContent += `Snow (3h): ${data.data.snow_3h}`;
+    
+    div.innerHTML = `
+            <i class="fas fa-cloud-rain"></i>
+            <h3>Precipitation</h3>
+            <p>${precipContent}</p>
         `;
     weatherDetails.appendChild(div);
   }

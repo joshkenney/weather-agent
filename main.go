@@ -813,28 +813,41 @@ func (agent *WeatherAgent) prepareWeatherData(weather WeatherResponse) map[strin
 
 	// Get sunrise/sunset in local time if available
 	var sunrise, sunset string
-	if weather.Sys.Sunrise > 0 {
+	var dayLength float64
+	if weather.Sys.Sunrise > 0 && weather.Sys.Sunset > 0 {
 		// Convert sunrise to location timezone
 		sunriseTime := time.Unix(weather.Sys.Sunrise, 0).In(locationTimezone)
 		sunrise = sunriseTime.Format("3:04 PM")
-	}
-	if weather.Sys.Sunset > 0 {
+		
 		// Convert sunset to location timezone
 		sunsetTime := time.Unix(weather.Sys.Sunset, 0).In(locationTimezone)
 		sunset = sunsetTime.Format("3:04 PM")
+		
+		// Calculate day length in hours and minutes
+		dayLengthSeconds := weather.Sys.Sunset - weather.Sys.Sunrise
+		dayLength = float64(dayLengthSeconds) / 3600.0
 	}
 
 	// Weather condition
 	condition := ""
 	description := ""
+	weatherId := 0
 	if len(weather.Weather) > 0 {
 		condition = weather.Weather[0].Main
 		description = weather.Weather[0].Description
+		weatherId = weather.Weather[0].ID
 	}
 
 	// Determine if it's day or night based on the time
 	hour := localTime.Hour()
 	isDaytime := hour >= 6 && hour < 20 // Simple approximation if we don't have actual sunrise/sunset
+	
+	// More accurate day/night calculation if we have sunrise/sunset
+	if weather.Sys.Sunrise > 0 && weather.Sys.Sunset > 0 {
+		currentUnix := localTime.Unix()
+		isDaytime = currentUnix >= weather.Sys.Sunrise && currentUnix < weather.Sys.Sunset
+	}
+	
 	dayNightString := "DAYTIME"
 	if !isDaytime {
 		dayNightString = "NIGHTTIME"
@@ -845,6 +858,95 @@ func (agent *WeatherAgent) prepareWeatherData(weather WeatherResponse) map[strin
 	time24h := localTime.Format("15:04")
 	timeWithSeconds := localTime.Format("3:04:05 PM")
 	fullTimeDate := localTime.Format("Monday, January 2, 2006 at 3:04 PM")
+	
+	// Calculate moon phase (simplified approximation)
+	// Get days since new moon on Jan 6, 2000
+	daysSinceNewMoon := (localTime.Unix() - 947182440) / 86400
+	// Moon phase cycles every 29.53 days
+	moonAge := float64(daysSinceNewMoon % 30) / 29.53
+	
+	var moonPhase string
+	switch {
+	case moonAge < 0.025 || moonAge >= 0.975: // 0-2.5% or 97.5-100%
+		moonPhase = "New Moon"
+	case moonAge < 0.225: // 2.5-22.5%
+		moonPhase = "Waxing Crescent"
+	case moonAge < 0.275: // 22.5-27.5%
+		moonPhase = "First Quarter"
+	case moonAge < 0.475: // 27.5-47.5%
+		moonPhase = "Waxing Gibbous"
+	case moonAge < 0.525: // 47.5-52.5%
+		moonPhase = "Full Moon"
+	case moonAge < 0.725: // 52.5-72.5%
+		moonPhase = "Waning Gibbous"
+	case moonAge < 0.775: // 72.5-77.5%
+		moonPhase = "Last Quarter"
+	default: // 77.5-97.5%
+		moonPhase = "Waning Crescent"
+	}
+	
+	// Get wind direction as cardinal/intercardinal point
+	windDegree := float64(weather.Wind.Deg)
+	windDirection := ""
+	switch {
+	case windDegree >= 337.5 || windDegree < 22.5:
+		windDirection = "N"
+	case windDegree >= 22.5 && windDegree < 67.5:
+		windDirection = "NE"
+	case windDegree >= 67.5 && windDegree < 112.5:
+		windDirection = "E"
+	case windDegree >= 112.5 && windDegree < 157.5:
+		windDirection = "SE"
+	case windDegree >= 157.5 && windDegree < 202.5:
+		windDirection = "S"
+	case windDegree >= 202.5 && windDegree < 247.5:
+		windDirection = "SW"
+	case windDegree >= 247.5 && windDegree < 292.5:
+		windDirection = "W"
+	case windDegree >= 292.5 && windDegree < 337.5:
+		windDirection = "NW"
+	}
+	
+	// Calculate heat index if temperature > 80°F (26.7°C) and humidity > 40%
+	var heatIndex float64
+	tempF := weather.Main.Temp
+	if agent.config.Units == "metric" {
+		tempF = weather.Main.Temp*9/5 + 32 // Convert to Fahrenheit for calculation
+	}
+	if tempF > 80 && weather.Main.Humidity > 40 {
+		// Rothfusz formula
+		heatIndex = -42.379 + 2.04901523*tempF + 10.14333127*float64(weather.Main.Humidity) - 
+			0.22475541*tempF*float64(weather.Main.Humidity) - 0.00683783*tempF*tempF - 
+			0.05481717*float64(weather.Main.Humidity)*float64(weather.Main.Humidity) + 
+			0.00122874*tempF*tempF*float64(weather.Main.Humidity) + 
+			0.00085282*tempF*float64(weather.Main.Humidity)*float64(weather.Main.Humidity) - 
+			0.00000199*tempF*tempF*float64(weather.Main.Humidity)*float64(weather.Main.Humidity)
+		
+		// Convert back to Celsius if needed
+		if agent.config.Units == "metric" {
+			heatIndex = (heatIndex - 32) * 5 / 9
+		}
+	}
+	
+	// Format visibility
+	visibilityStr := "Unknown"
+	// OpenWeatherMap returns visibility in meters, and 10000 is their default maximum
+	if weather.Visibility > 0 {
+		if agent.config.Units == "metric" {
+			visibilityStr = fmt.Sprintf("%.1f km", float64(weather.Visibility)/1000)
+		} else {
+			visibilityStr = fmt.Sprintf("%.1f miles", float64(weather.Visibility)/1609.34)
+		}
+		
+		// If the visibility is at the API's default maximum (10000 meters)
+		if weather.Visibility == 10000 {
+			if agent.config.Units == "metric" {
+				visibilityStr = "10+ km (excellent)"
+			} else {
+				visibilityStr = "6.2+ miles (excellent)"
+			}
+		}
+	}
 
 	// Create a map of the current weather data
 	data := map[string]interface{}{
@@ -861,34 +963,48 @@ func (agent *WeatherAgent) prepareWeatherData(weather WeatherResponse) map[strin
 		"date":                  localTime.Format("January 2, 2006"),
 		"temperature":           fmt.Sprintf("%.1f%s", weather.Main.Temp, agent.getTempUnit()),
 		"feels_like":            fmt.Sprintf("%.1f%s", weather.Main.FeelsLike, agent.getTempUnit()),
+		"temp_min":              fmt.Sprintf("%.1f%s", weather.Main.TempMin, agent.getTempUnit()),
+		"temp_max":              fmt.Sprintf("%.1f%s", weather.Main.TempMax, agent.getTempUnit()),
 		"condition":             condition,
 		"description":           description,
+		"weather_id":            weatherId,
 		"humidity":              weather.Main.Humidity,
+		"pressure":              fmt.Sprintf("%d hPa", weather.Main.Pressure),
 		"wind_speed":            fmt.Sprintf("%.1f %s", weather.Wind.Speed, agent.getWindUnit()),
 		"wind_direction":        weather.Wind.Deg,
-		"visibility":            weather.Visibility,
+		"wind_direction_text":   windDirection,
+		"wind_gust":             fmt.Sprintf("%.1f %s", weather.Wind.Gust, agent.getWindUnit()),
+		"visibility":            visibilityStr,
+		"cloud_cover":           fmt.Sprintf("%d%%", weather.Clouds.All),
 		"sunrise":               sunrise,
 		"sunset":                sunset,
+		"day_length":            fmt.Sprintf("%.1f hours", dayLength),
+		"moon_phase":            moonPhase,
 		"units":                 agent.config.Units,
 		"is_daytime":            isDaytime,
 		"timezone_offset_hours": weather.Timezone / 3600,
 		"timezone_name":         fmt.Sprintf("UTC%+d", weather.Timezone/3600),
 	}
+	
+	// Add heat index if calculated
+	if heatIndex > 0 {
+		data["heat_index"] = fmt.Sprintf("%.1f%s", heatIndex, agent.getTempUnit())
+	}
 
 	// Add rain data if available
 	if weather.Rain.OneHour > 0 {
-		data["rain_1h"] = weather.Rain.OneHour
+		data["rain_1h"] = fmt.Sprintf("%.1f mm", weather.Rain.OneHour)
 	}
 	if weather.Rain.ThreeHours > 0 {
-		data["rain_3h"] = weather.Rain.ThreeHours
+		data["rain_3h"] = fmt.Sprintf("%.1f mm", weather.Rain.ThreeHours)
 	}
 
 	// Add snow data if available
 	if weather.Snow.OneHour > 0 {
-		data["snow_1h"] = weather.Snow.OneHour
+		data["snow_1h"] = fmt.Sprintf("%.1f mm", weather.Snow.OneHour)
 	}
 	if weather.Snow.ThreeHours > 0 {
-		data["snow_3h"] = weather.Snow.ThreeHours
+		data["snow_3h"] = fmt.Sprintf("%.1f mm", weather.Snow.ThreeHours)
 	}
 
 	// Time display for UI - ensure we have a time field specifically for the UI
@@ -958,6 +1074,10 @@ You MUST use this exact time in your weather message.
 	// Add VERY explicit instruction for what kind of response we want
 	userMessage += fmt.Sprintf(`
 Based on this weather data, generate a helpful, informative, and engaging message about the current weather. Make it natural and conversational.
+
+Consider all the weather details provided, such as temperature, humidity, wind, precipitation, visibility, cloud cover, and astronomical information when relevant. If there are any notable weather conditions (extreme temperatures, storms, etc.), highlight those.
+
+You can mention interesting weather facts or patterns if they're relevant to the current conditions. For example, if it's a full moon on a clear night, or if it's an unusually warm/cold day for the season.
 
 CRITICAL: The current local time in %s is %s. DO NOT modify or reinterpret this time. Reference this EXACT time in your response.`, currentWeather.Name, time12h)
 
