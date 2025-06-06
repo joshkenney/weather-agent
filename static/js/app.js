@@ -361,6 +361,13 @@ function updateWeatherDetails(data) {
         return `AQI ${value}`;
       }
     },
+    {
+      key: "aqi_description",
+      label: "Air Quality",
+      icon: "fa-wind",
+      optional: true,
+      hideLabel: true
+    },
     { key: "time", label: "Local Time", icon: "fa-clock" },
   ];
 
@@ -387,17 +394,52 @@ function updateWeatherDetails(data) {
           value = value + item.suffix;
         }
       }
+      
+      // Skip showing aqi_description in the main list since we show it in the detailed view
+      if (item.key === "aqi_description") {
+        return;
+      }
 
       // Get appropriate icon for condition
       let icon = item.icon;
       if (item.key === "condition") {
         icon = getWeatherIcon(value.toLowerCase());
       }
+      
+      // Special handling for AQI to add color indicator
+      let colorIndicator = '';
+      if (item.key === "aqi" && data.data.aqi_description) {
+        const aqiValue = parseInt(value.toString().replace('AQI ', ''));
+        const aqiSource = data.data.aqi_source || "Unknown";
+        
+        let colorClass = "";
+        if (aqiSource === "OpenWeatherMap") {
+          // OpenWeatherMap uses 1-5 scale
+          switch(aqiValue) {
+            case 1: colorClass = "aqi-good-indicator"; break;
+            case 2: colorClass = "aqi-fair-indicator"; break;
+            case 3: colorClass = "aqi-moderate-indicator"; break;
+            case 4: colorClass = "aqi-poor-indicator"; break;
+            case 5: colorClass = "aqi-very-poor-indicator"; break;
+          }
+        } else if (aqiSource === "IQAir") {
+          // IQAir uses US AQI standard (0-500)
+          if (aqiValue <= 50) colorClass = "aqi-good-indicator";
+          else if (aqiValue <= 100) colorClass = "aqi-fair-indicator";
+          else if (aqiValue <= 150) colorClass = "aqi-moderate-indicator";
+          else if (aqiValue <= 200) colorClass = "aqi-poor-indicator";
+          else colorClass = "aqi-very-poor-indicator";
+        }
+        
+        if (colorClass) {
+          colorIndicator = `<span class="${colorClass}"></span>`;
+        }
+      }
 
       div.innerHTML = `
                 <i class="fas ${icon}"></i>
-                <h3>${item.label}</h3>
-                <p>${value}</p>
+                <h3>${item.hideLabel ? '' : item.label}</h3>
+                <p>${colorIndicator}${value}</p>
             `;
       weatherDetails.appendChild(div);
     }
@@ -469,14 +511,29 @@ function updateWeatherDetails(data) {
     const div = document.createElement("div");
     div.className = "weather-item";
     
-    // Style based on AQI value
+    // Determine AQI source and set appropriate styling
+    const aqiSource = data.data.aqi_source || "Unknown";
+    const aqiValue = parseInt(data.data.aqi);
+    
     let aqiClass = "";
-    switch(parseInt(data.data.aqi)) {
-      case 1: aqiClass = "aqi-good"; break;
-      case 2: aqiClass = "aqi-fair"; break;
-      case 3: aqiClass = "aqi-moderate"; break;
-      case 4: aqiClass = "aqi-poor"; break;
-      case 5: aqiClass = "aqi-very-poor"; break;
+    
+    // Style based on AQI value and source
+    if (aqiSource === "OpenWeatherMap") {
+      // OpenWeatherMap uses 1-5 scale
+      switch(aqiValue) {
+        case 1: aqiClass = "aqi-good"; break;
+        case 2: aqiClass = "aqi-fair"; break;
+        case 3: aqiClass = "aqi-moderate"; break;
+        case 4: aqiClass = "aqi-poor"; break;
+        case 5: aqiClass = "aqi-very-poor"; break;
+      }
+    } else if (aqiSource === "IQAir") {
+      // IQAir uses US AQI standard (0-500)
+      if (aqiValue <= 50) aqiClass = "aqi-good";
+      else if (aqiValue <= 100) aqiClass = "aqi-fair";
+      else if (aqiValue <= 150) aqiClass = "aqi-moderate";
+      else if (aqiValue <= 200) aqiClass = "aqi-poor";
+      else aqiClass = "aqi-very-poor";
     }
     
     if (aqiClass) {
@@ -485,12 +542,25 @@ function updateWeatherDetails(data) {
     
     // Create pollutant details if available
     let pollutantDetails = "";
+    
+    // Add main pollutant if available
+    if (data.data.pollutant_name && data.data.pollutant_value) {
+      pollutantDetails += `Main: ${data.data.pollutant_name} (${data.data.pollutant_value})<br>`;
+    }
+    
+    // Add other pollutants
     if (data.data.pm2_5) pollutantDetails += `PM2.5: ${data.data.pm2_5}<br>`;
     if (data.data.pm10) pollutantDetails += `PM10: ${data.data.pm10}<br>`;
     if (data.data.o3) pollutantDetails += `O₃: ${data.data.o3}<br>`;
-    if (data.data.no2) pollutantDetails += `NO₂: ${data.data.no2}`;
+    if (data.data.no2) pollutantDetails += `NO₂: ${data.data.no2}<br>`;
+    if (data.data.so2) pollutantDetails += `SO₂: ${data.data.so2}<br>`;
+    if (data.data.co) pollutantDetails += `CO: ${data.data.co}`;
     
-    let aqiContent = data.data.aqi_description;
+    let aqiContent = `${data.data.aqi} - ${data.data.aqi_description}`;
+    if (aqiSource) {
+      aqiContent += `<br><small>Source: ${aqiSource}</small>`;
+    }
+    
     if (pollutantDetails) {
       aqiContent += `<br><details>
         <summary>Pollutant Details</summary>

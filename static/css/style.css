@@ -235,6 +235,26 @@ footer {
     background-color: rgba(210, 180, 140, 0.2);
 }
 
+/* Air quality specific styles */
+.weather-item.aqi-good h3,
+.weather-item.aqi-fair h3,
+.weather-item.aqi-moderate h3,
+.weather-item.aqi-poor h3,
+.weather-item.aqi-very-poor h3 {
+    margin-bottom: 5px;
+}
+
+.weather-item.aqi-good small,
+.weather-item.aqi-fair small,
+.weather-item.aqi-moderate small,
+.weather-item.aqi-poor small,
+.weather-item.aqi-very-poor small {
+    display: block;
+    font-size: 0.7em;
+    color: var(--text-light);
+    margin-top: 4px;
+}
+
 /* AQI specific styles */
 .aqi-good {
     border-left: 4px solid #00e400;
@@ -256,6 +276,40 @@ footer {
     border-left: 4px solid #ff0000;
 }
 
+/* AQI color indicators for main display */
+.aqi-good-indicator, 
+.aqi-fair-indicator, 
+.aqi-moderate-indicator, 
+.aqi-poor-indicator, 
+.aqi-very-poor-indicator {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    margin-right: 6px;
+    vertical-align: middle;
+}
+
+.aqi-good-indicator {
+    background-color: #00e400;
+}
+
+.aqi-fair-indicator {
+    background-color: #92d050;
+}
+
+.aqi-moderate-indicator {
+    background-color: #ffff00;
+}
+
+.aqi-poor-indicator {
+    background-color: #ff7e00;
+}
+
+.aqi-very-poor-indicator {
+    background-color: #ff0000;
+}
+
 .weather-item details {
     margin-top: 10px;
     font-size: 0.85em;
@@ -266,12 +320,14 @@ footer {
     cursor: pointer;
     color: var(--primary-color);
     font-weight: 600;
+    margin-top: 8px;
 }
 
 .weather-item details p {
     padding: 8px 0;
     font-size: 0.95em;
     font-weight: normal;
+    line-height: 1.4;
 }
 
 /* Animation for refresh icon */
