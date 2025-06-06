@@ -1073,21 +1073,16 @@ func main() {
 
 	// Set up HTTP handlers
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// Serve the main HTML page
+		// Serve the main HTML page with loading state
 		tmpl, err := template.ParseFiles("templates/index.html")
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		// Generate fresh weather data and message
-		message, city, country, timestamp, _, err := generateWeatherUpdate()
-		if err != nil {
-			agent.logger.Printf("Error generating weather update: %v", err)
-			// Show error page or fallback
-			http.Error(w, "Unable to fetch weather data", http.StatusInternalServerError)
-			return
-		}
+		// Get current city/country from environment
+		currentCity := getEnv("WEATHER_CITY", config.City)
+		currentCountry := getEnv("WEATHER_COUNTRY", config.CountryCode)
 
 		data := struct {
 			City      string
@@ -1095,10 +1090,10 @@ func main() {
 			Message   string
 			Timestamp string
 		}{
-			City:      city,
-			Country:   country,
-			Message:   message,
-			Timestamp: timestamp,
+			City:      currentCity,
+			Country:   currentCountry,
+			Message:   "Loading weather data...",
+			Timestamp: "Initializing...",
 		}
 
 		tmpl.Execute(w, data)
