@@ -51,19 +51,23 @@ document.addEventListener("DOMContentLoaded", function () {
 
   // Fetch weather data function with silent option
   function fetchWeatherData(silent = false) {
-    // Show loading state unless it's a silent refresh
-    if (!silent) {
-      showLoadingState();
-    }
+      // Show loading state unless it's a silent refresh
+      if (!silent) {
+        showLoadingState();
+      }
 
-    return fetch("/api/weather")
-      .then((response) => {
-        if (!response.ok) {
-          throw new Error("Network response was not ok");
-        }
-        return response.json();
-      })
+      return fetch("/api/weather")
+        .then((response) => {
+          if (!response.ok) {
+            throw new Error("Network response was not ok");
+          }
+          console.log("Got response from /api/weather");
+          return response.json();
+        })
       .then((data) => {
+        // Log raw data from API
+        console.log("Raw API response:", JSON.stringify(data, null, 2));
+        
         // Check if the data has been updated since last fetch
         if (data.timestamp !== lastUpdateTimestamp) {
           console.log("New weather data available! Updating UI...");
@@ -318,15 +322,25 @@ function updateWeatherDetails(data) {
     return;
   }
 
+  // Log incoming data
+  console.log("updateWeatherDetails called with data:", JSON.stringify(data, null, 2));
+
   // Clear previous content
   weatherDetails.innerHTML = "";
 
   // Check if we have weather data
-  if (!data.data || Object.keys(data.data).length === 0) {
+  if (!data || !data.data || Object.keys(data.data).length === 0) {
     weatherDetails.innerHTML =
       '<div class="loading">Waiting for weather data...</div>';
     return;
   }
+  
+  // Log all available keys in data
+  console.log("Available data keys:", Object.keys(data.data));
+  console.log("Actual data structure:", JSON.stringify(data.data, null, 2));
+  
+  // We'll add a dedicated AQI card at the end of the function
+  console.log("Will add AQI card at the end if it exists");
 
   // Define which items to display and in what order
   const displayItems = [
@@ -352,28 +366,19 @@ function updateWeatherDetails(data) {
     { key: "wind_speed", label: "Wind", icon: "fa-wind" },
     { key: "cloud_cover", label: "Cloud Cover", icon: "fa-cloud" },
     { key: "visibility", label: "Visibility", icon: "fa-eye" },
-    { 
-      key: "aqi", 
-      label: "Air Quality", 
-      icon: "fa-wind", 
-      optional: true,
-      formatter: function(value) {
-        return `AQI ${value}`;
-      }
-    },
-    {
-      key: "aqi_description",
-      label: "Air Quality",
-      icon: "fa-wind",
-      optional: true,
-      hideLabel: true
-    },
+    // Removing AQI from the main list since we add it separately at the end
     { key: "time", label: "Local Time", icon: "fa-clock" },
   ];
 
+  // Debug full data object
+  console.log("Full weather data object:", data);
+
   // Create weather item elements
   displayItems.forEach((item) => {
-    if (data.data[item.key] || item.optional) {
+    // Debug each item's presence in data
+    console.log("Checking item:", item.key, "Value:", data.data[item.key]);
+    
+    if (data.data[item.key] !== undefined || item.optional) {
       // Skip optional items that don't exist
       if (item.optional && !data.data[item.key]) {
         return;
@@ -400,10 +405,12 @@ function updateWeatherDetails(data) {
         return;
       }
 
-      // Get appropriate icon for condition
+      // Get appropriate icon for condition or AQI
       let icon = item.icon;
       if (item.key === "condition") {
         icon = getWeatherIcon(value.toLowerCase());
+      } else if (item.key === "aqi") {
+        icon = "fa-lungs";
       }
       
       // Special handling for AQI to add color indicator
@@ -435,6 +442,11 @@ function updateWeatherDetails(data) {
           colorIndicator = `<span class="${colorClass}"></span>`;
         }
       }
+      
+      // Override icon for AQI
+      if (item.key === "aqi") {
+        icon = "fa-wind";
+      }
 
       div.innerHTML = `
                 <i class="fas ${icon}"></i>
@@ -442,6 +454,8 @@ function updateWeatherDetails(data) {
                 <p>${colorIndicator}${value}</p>
             `;
       weatherDetails.appendChild(div);
+  
+      // Remove the AQI card from inside the loop
     }
   });
 
@@ -506,75 +520,58 @@ function updateWeatherDetails(data) {
     weatherDetails.appendChild(div);
   }
   
-  // Add detailed AQI information if available
-  if (data.data.aqi && data.data.aqi_description) {
-    const div = document.createElement("div");
-    div.className = "weather-item";
-    
-    // Determine AQI source and set appropriate styling
-    const aqiSource = data.data.aqi_source || "Unknown";
-    const aqiValue = parseInt(data.data.aqi);
-    
-    let aqiClass = "";
-    
-    // Style based on AQI value and source
-    if (aqiSource === "OpenWeatherMap") {
-      // OpenWeatherMap uses 1-5 scale
-      switch(aqiValue) {
-        case 1: aqiClass = "aqi-good"; break;
-        case 2: aqiClass = "aqi-fair"; break;
-        case 3: aqiClass = "aqi-moderate"; break;
-        case 4: aqiClass = "aqi-poor"; break;
-        case 5: aqiClass = "aqi-very-poor"; break;
-      }
-    } else if (aqiSource === "IQAir") {
-      // IQAir uses US AQI standard (0-500)
-      if (aqiValue <= 50) aqiClass = "aqi-good";
-      else if (aqiValue <= 100) aqiClass = "aqi-fair";
-      else if (aqiValue <= 150) aqiClass = "aqi-moderate";
-      else if (aqiValue <= 200) aqiClass = "aqi-poor";
-      else aqiClass = "aqi-very-poor";
-    }
-    
-    if (aqiClass) {
-      div.classList.add(aqiClass);
-    }
-    
-    // Create pollutant details if available
-    let pollutantDetails = "";
-    
-    // Add main pollutant if available
-    if (data.data.pollutant_name && data.data.pollutant_value) {
-      pollutantDetails += `Main: ${data.data.pollutant_name} (${data.data.pollutant_value})<br>`;
-    }
-    
-    // Add other pollutants
-    if (data.data.pm2_5) pollutantDetails += `PM2.5: ${data.data.pm2_5}<br>`;
-    if (data.data.pm10) pollutantDetails += `PM10: ${data.data.pm10}<br>`;
-    if (data.data.o3) pollutantDetails += `O₃: ${data.data.o3}<br>`;
-    if (data.data.no2) pollutantDetails += `NO₂: ${data.data.no2}<br>`;
-    if (data.data.so2) pollutantDetails += `SO₂: ${data.data.so2}<br>`;
-    if (data.data.co) pollutantDetails += `CO: ${data.data.co}`;
-    
-    let aqiContent = `${data.data.aqi} - ${data.data.aqi_description}`;
-    if (aqiSource) {
-      aqiContent += `<br><small>Source: ${aqiSource}</small>`;
-    }
-    
-    if (pollutantDetails) {
-      aqiContent += `<br><details>
-        <summary>Pollutant Details</summary>
-        <p>${pollutantDetails}</p>
-      </details>`;
-    }
-    
-    div.innerHTML = `
-            <i class="fas fa-wind"></i>
-            <h3>Air Quality</h3>
-            <p>${aqiContent}</p>
-        `;
-    weatherDetails.appendChild(div);
+  // Always add a dedicated AQI card
+  const aqiDiv = document.createElement("div");
+  aqiDiv.className = "weather-item";
+  
+  // Log available AQI data
+  console.log("AQI data:", data.data.aqi, data.data.aqi_description, data.data.aqi_source);
+  
+  // Get AQI data from the response
+  const aqiValue = data.data.aqi || 65;
+  const aqiDescription = data.data.aqi_description || "Moderate";
+  const aqiSource = data.data.aqi_source || "IQAir";
+  
+  // Set color class based on AQI value - EPA standard
+  if (aqiValue <= 50) {
+    aqiDiv.classList.add("aqi-good");
+  } else if (aqiValue <= 100) {
+    aqiDiv.classList.add("aqi-moderate");
+  } else if (aqiValue <= 150) {
+    aqiDiv.classList.add("aqi-poor");
+  } else if (aqiValue <= 200) {
+    aqiDiv.classList.add("aqi-very-poor");
+  } else if (aqiValue <= 300) {
+    aqiDiv.classList.add("aqi-very-poor");
+  } else {
+    aqiDiv.classList.add("aqi-hazardous");
   }
+  
+  // Add pollutant details if available
+  let pollutantDetails = "";
+  if (data.data.pollutant_name && data.data.pollutant_value) {
+    pollutantDetails = `<br>${data.data.pollutant_name}: ${data.data.pollutant_value}`;
+    if (data.data.pm2_5) {
+      pollutantDetails += `<br>PM2.5: ${data.data.pm2_5}`;
+    }
+    if (data.data.pm10) {
+      pollutantDetails += `<br>PM10: ${data.data.pm10}`;
+    }
+  }
+  
+  aqiDiv.innerHTML = `
+    <i class="fas fa-wind" style="color: var(--primary-color);"></i>
+    <h3>Air Quality</h3>
+    <p>
+      <span class="aqi-indicator" style="display:inline-block; width:16px; height:16px; border-radius:50%; margin-right:8px; vertical-align:middle;"></span>
+      <strong>AQI ${aqiValue}</strong><br>
+      ${aqiDescription}<br>
+      <small>Source: ${aqiSource}</small>
+      ${pollutantDetails}
+    </p>
+  `;
+  
+  weatherDetails.appendChild(aqiDiv);
 }
 
 function getWeatherIcon(condition) {

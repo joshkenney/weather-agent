@@ -434,7 +434,21 @@ func (agent *WeatherAgent) fetchWeather() (WeatherResponse, error) {
 
 	// Try to fetch AQI data from IQAir if we have an API key
 	if agent.config.IQAirAPIKey != "" {
+		fmt.Printf("\n==== INITIATING IQAIR API CALL ====\n")
+		fmt.Printf("DEBUG: Using IQAir API key: %s..., length: %d\n", agent.config.IQAirAPIKey[:4], len(agent.config.IQAirAPIKey))
+		fmt.Printf("DEBUG: Coordinates: lat=%.6f, lon=%.6f\n", lat, lon)
+		agent.logger.Printf("DEBUG: Using IQAir API key: %s..., length: %d", agent.config.IQAirAPIKey[:4], len(agent.config.IQAirAPIKey))
+		
+		// Force a fresh call to the IQAir API
 		agent.fetchIQAirData(&weather, lat, lon)
+		
+		// Check if IQAir data was successfully added
+		if weather.IQAirData.AQI > 0 {
+			fmt.Printf("DEBUG: Successfully added IQAir data: AQI=%d, Category=%s\n", 
+				weather.IQAirData.AQI, weather.IQAirData.Category)
+		} else {
+			fmt.Printf("WARNING: IQAir data was not added to the weather response\n")
+		}
 	} else {
 		// Fallback to OpenWeatherMap AQI data
 		agent.logger.Printf("No IQAir API key configured, falling back to OpenWeatherMap AQI data")
@@ -922,29 +936,69 @@ func getAQIDescription(aqi int) string {
 
 // Fetch air quality data from IQAir API
 func (agent *WeatherAgent) fetchIQAirData(weather *WeatherResponse, lat, lon float64) {
-	// IQAir API endpoint
-	iqairURL := fmt.Sprintf("https://api.airvisual.com/v2/nearest_city?lat=%.6f&lon=%.6f&key=%s",
-		lat, lon, agent.config.IQAirAPIKey)
+	// IQAir API endpoint - add timestamp to prevent caching
+	timestamp := time.Now().UnixNano()
+	iqairURL := fmt.Sprintf("https://api.airvisual.com/v2/nearest_city?lat=%.6f&lon=%.6f&key=%s&_t=%d",
+		lat, lon, agent.config.IQAirAPIKey, timestamp)
 	
-	agent.logger.Printf("DEBUG: Fetching AQI data from IQAir: %s", iqairURL)
+	agent.logger.Printf("DEBUG: Fetching AQI data from IQAir: %s", strings.Replace(iqairURL, agent.config.IQAirAPIKey, "[REDACTED]", 1))
+	agent.logger.Printf("DEBUG: IQAir API key length: %d, first 4 chars: %s", len(agent.config.IQAirAPIKey), agent.config.IQAirAPIKey[:4])
 	
-	iqairResp, err := http.Get(iqairURL)
+	// Print directly to stdout for debugging
+	fmt.Printf("\n==== IQAIR API REQUEST ====\n")
+	fmt.Printf("DEBUG: Making IQAir API request with key: %s... (length: %d)\n", 
+		agent.config.IQAirAPIKey[:4], len(agent.config.IQAirAPIKey))
+	fmt.Printf("DEBUG: Request URL: %s\n", strings.Replace(iqairURL, agent.config.IQAirAPIKey, "[REDACTED]", 1))
+	
+	client := &http.Client{
+		Timeout: time.Second * 10,
+	}
+	req, _ := http.NewRequest("GET", iqairURL, nil)
+	req.Header.Add("User-Agent", "WeatherAgent/1.0")
+	// Disable caching
+	req.Header.Add("Cache-Control", "no-cache, no-store, must-revalidate")
+	req.Header.Add("Pragma", "no-cache")
+	
+	iqairResp, err := client.Do(req)
 	if err != nil {
-		agent.logger.Printf("Warning: Failed to fetch IQAir data: %v", err)
+		agent.logger.Printf("WARNING: Failed to fetch IQAir data: %v", err)
+		fmt.Printf("ERROR: Failed to fetch IQAir data: %v\n", err)  // Print directly to stdout
 		return
 	}
 	defer iqairResp.Body.Close()
 	
-	agent.logger.Printf("DEBUG: IQAir API response status: %d", iqairResp.StatusCode)
+	statusMsg := fmt.Sprintf("DEBUG: IQAir API response status: %d", iqairResp.StatusCode)
+	agent.logger.Print(statusMsg)
+	fmt.Println(statusMsg)
+	
+	// Log all response headers for debugging
+	fmt.Println("DEBUG: IQAir API response headers:")
+	for name, values := range iqairResp.Header {
+		for _, value := range values {
+			fmt.Printf("  %s: %s\n", name, value)
+		}
+	}
 	
 	if iqairResp.StatusCode != http.StatusOK {
-		agent.logger.Printf("Warning: IQAir API returned status %d", iqairResp.StatusCode)
+		errMsg := fmt.Sprintf("WARNING: IQAir API returned status %d", iqairResp.StatusCode)
+		agent.logger.Print(errMsg)
+		fmt.Println(errMsg)
 		return
 	}
 	
 	// Read the response body for logging
-	bodyBytes, _ := io.ReadAll(iqairResp.Body)
-	agent.logger.Printf("DEBUG: IQAir API response body: %s", string(bodyBytes))
+	bodyBytes, readErr := io.ReadAll(iqairResp.Body)
+	if readErr != nil {
+		errMsg := fmt.Sprintf("WARNING: Failed to read IQAir response body: %v", readErr)
+		agent.logger.Print(errMsg)
+		fmt.Println(errMsg)
+		return
+	}
+	
+	// Log response body to both logger and stdout
+	responseBody := string(bodyBytes)
+	agent.logger.Printf("DEBUG: IQAir API response body: %s", responseBody)
+	fmt.Printf("DEBUG: IQAir API response body: %s\n", responseBody)
 	
 	// Parse the IQAir response
 	var iqairResponse struct {
@@ -988,14 +1042,20 @@ func (agent *WeatherAgent) fetchIQAirData(weather *WeatherResponse, lat, lon flo
 	bodyReader := bytes.NewReader(bodyBytes)
 	
 	if err := json.NewDecoder(bodyReader).Decode(&iqairResponse); err != nil {
-		agent.logger.Printf("Warning: Failed to decode IQAir data: %v", err)
+		errMsg := fmt.Sprintf("WARNING: Failed to decode IQAir data: %v", err)
+		agent.logger.Print(errMsg)
+		fmt.Println(errMsg)
 		return
 	}
 	
 	if iqairResponse.Status != "success" {
-		agent.logger.Printf("Warning: IQAir API returned status %s", iqairResponse.Status)
+		errMsg := fmt.Sprintf("WARNING: IQAir API returned status %s", iqairResponse.Status)
+		agent.logger.Print(errMsg)
+		fmt.Println(errMsg)
 		return
 	}
+	
+	fmt.Println("DEBUG: Successfully parsed IQAir API response with status: success")
 	
 	// Get AQI category based on US AQI value
 	aqi := iqairResponse.Data.Current.Pollution.Aqius
@@ -1082,7 +1142,19 @@ func (agent *WeatherAgent) fetchIQAirData(weather *WeatherResponse, lat, lon flo
 		PM10:           iqairResponse.Data.Current.Pollution.P1,
 	}
 	
-	agent.logger.Printf("Successfully added IQAir AQI data: %d (%s)", aqi, category)
+	successMsg := fmt.Sprintf("Successfully added IQAir AQI data: %d (%s)", aqi, category)
+	agent.logger.Print(successMsg)
+	fmt.Println(successMsg)
+	fmt.Println("==== IQAIR API REQUEST COMPLETE ====\n")
+	
+	// Log to a special file just for IQAir API calls
+	logFile, err := os.OpenFile("iqair_api_calls.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err == nil {
+		defer logFile.Close()
+		timestamp := time.Now().Format(time.RFC3339)
+		logFile.WriteString(fmt.Sprintf("[%s] IQAir API call: lat=%.6f, lon=%.6f, status=%s, AQI=%d, Category=%s\n", 
+			timestamp, lat, lon, "success", aqi, category))
+	}
 }
 
 func (agent *WeatherAgent) prepareWeatherData(weather WeatherResponse) map[string]interface{} {
@@ -1598,9 +1670,13 @@ func (agent *WeatherAgent) generateHistoryContext() string {
 
 // Update weather and generate new LLM message
 func (agent *WeatherAgent) update() {
+	fmt.Println("\n==== STARTING WEATHER UPDATE ====")
+	fmt.Printf("Time: %s\n", time.Now().Format(time.RFC3339))
+	
 	weather, err := agent.fetchWeather()
 	if err != nil {
 		agent.logger.Printf("Error fetching weather: %v", err)
+		fmt.Printf("Error fetching weather: %v\n", err)
 		return
 	}
 
@@ -1650,6 +1726,11 @@ func (agent *WeatherAgent) update() {
 
 // Modify the loadConfig function to remove hardcoded secrets
 func loadConfig() Config {
+	// Log available environment variables for debugging
+	fmt.Println("DEBUG: Environment variables:")
+	fmt.Printf("DEBUG: IQAIR_API_KEY set: %t\n", os.Getenv("IQAIR_API_KEY") != "")
+	fmt.Printf("DEBUG: LLM_API_KEY set: %t\n", os.Getenv("LLM_API_KEY") != "")
+	
 	config := Config{
 		WeatherAPIKey:  getEnv("WEATHER_API_KEY", "not-needed"), // Open-Meteo doesn't need an API key
 		LLMAPIKey:      getEnv("LLM_API_KEY", ""),               // Never hardcode API keys
@@ -1690,10 +1771,20 @@ func loadConfig() Config {
 
 // Add this function to help with loading secrets from a file
 func loadSecretsFromFile(filename string) {
+	fmt.Printf("DEBUG: Attempting to load secrets from file: %s\n", filename)
 	data, err := os.ReadFile(filename)
 	if err != nil {
 		// File doesn't exist or can't be read - just continue with env vars
+		fmt.Printf("DEBUG: Error loading secrets file: %v\n", err)
 		return
+	}
+	fmt.Printf("DEBUG: Successfully loaded secrets file, size: %d bytes\n", len(data))
+	
+	// Check if file contains IQAIR_API_KEY
+	if strings.Contains(string(data), "IQAIR_API_KEY") {
+		fmt.Println("DEBUG: IQAIR_API_KEY found in secrets file")
+	} else {
+		fmt.Println("WARNING: IQAIR_API_KEY not found in secrets file")
 	}
 
 	lines := strings.Split(string(data), "\n")
@@ -1714,6 +1805,9 @@ func loadSecretsFromFile(filename string) {
 		// Only set if not already set via environment
 		if os.Getenv(key) == "" {
 			os.Setenv(key, value)
+			fmt.Printf("DEBUG: Set environment variable from .env file: %s\n", key)
+		} else {
+			fmt.Printf("DEBUG: Environment variable already set: %s\n", key)
 		}
 	}
 }
@@ -1786,10 +1880,68 @@ func (agent *WeatherAgent) debugTimeInfo(weather WeatherResponse) {
 }
 
 // Modify the main function to load secrets before config
+func testIQAirAPI(apiKey string) {
+	if apiKey == "" {
+		fmt.Println("ERROR: IQAir API key is empty")
+		return
+	}
+	
+	fmt.Printf("Testing IQAir API with key: %s (length: %d)\n", apiKey[:4] + "...", len(apiKey))
+	
+	// Test with New York coordinates
+	lat, lon := 40.7128, -74.0060
+	
+	iqairURL := fmt.Sprintf("https://api.airvisual.com/v2/nearest_city?lat=%.6f&lon=%.6f&key=%s",
+		lat, lon, apiKey)
+	
+	fmt.Printf("DEBUG: IQAir API URL: %s\n", strings.Replace(iqairURL, apiKey, "[REDACTED]", 1))
+	
+	client := &http.Client{
+		Timeout: time.Second * 10,
+	}
+	
+	req, _ := http.NewRequest("GET", iqairURL, nil)
+	req.Header.Add("User-Agent", "WeatherAgent/1.0")
+	
+	fmt.Println("DEBUG: Sending request to IQAir API...")
+	
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Printf("ERROR: Failed to call IQAir API: %v\n", err)
+		return
+	}
+	defer resp.Body.Close()
+	
+	fmt.Printf("DEBUG: IQAir API response status: %d\n", resp.StatusCode)
+	
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Printf("ERROR: Failed to read response body: %v\n", err)
+		return
+	}
+	
+	fmt.Printf("DEBUG: IQAir API response body: %s\n", string(bodyBytes))
+	
+	var result map[string]interface{}
+	if err := json.Unmarshal(bodyBytes, &result); err != nil {
+		fmt.Printf("ERROR: Failed to parse JSON response: %v\n", err)
+		return
+	}
+	
+	fmt.Printf("DEBUG: Parsed response: %+v\n", result)
+}
+
 func main() {
 	// Load secrets and config as before
 	loadSecretsFromFile(".env")
 	config := loadConfig()
+
+	// Test IQAir API directly
+	fmt.Println("=====================")
+	fmt.Println("TESTING IQAIR API")
+	fmt.Println("=====================")
+	testIQAirAPI(config.IQAirAPIKey)
+	fmt.Println("=====================")
 
 	// Check for required API key
 	if config.LLMAPIKey == "" {
@@ -1934,6 +2086,11 @@ func main() {
 
 	// API endpoint to get fresh weather data
 	http.HandleFunc("/api/weather", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Printf("\n==== RECEIVED REQUEST TO /api/weather ENDPOINT ====\n")
+		fmt.Printf("Time: %s\n", time.Now().Format(time.RFC3339))
+		fmt.Printf("Remote address: %s\n", r.RemoteAddr)
+		fmt.Printf("User agent: %s\n", r.UserAgent())
+		
 		// Check if coordinates are provided in query parameters
 		latParam := r.URL.Query().Get("lat")
 		lonParam := r.URL.Query().Get("lon")

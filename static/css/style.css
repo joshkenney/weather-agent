@@ -142,6 +142,37 @@ header h1 {
     color: var(--primary-color);
 }
 
+/* Special styling for AQI icon */
+.weather-item.aqi-good i,
+.weather-item.aqi-fair i,
+.weather-item.aqi-moderate i,
+.weather-item.aqi-poor i,
+.weather-item.aqi-very-poor i {
+    position: relative;
+    font-size: 2.2em;
+    transition: all 0.3s ease;
+}
+
+.weather-item.aqi-good i {
+    color: #00e400;
+}
+
+.weather-item.aqi-fair i {
+    color: #92d050;
+}
+
+.weather-item.aqi-moderate i {
+    color: #ffff00;
+}
+
+.weather-item.aqi-poor i {
+    color: #ff7e00;
+}
+
+.weather-item.aqi-very-poor i {
+    color: #ff0000;
+}
+
 /* Loading indicator */
 .loading {
     grid-column: 1 / -1;
@@ -257,23 +288,23 @@ footer {
 
 /* AQI specific styles */
 .aqi-good {
-    border-left: 4px solid #00e400;
-}
-
-.aqi-fair {
-    border-left: 4px solid #92d050;
+    /* No special border or background */
 }
 
 .aqi-moderate {
-    border-left: 4px solid #ffff00;
+    /* No special border or background */
 }
 
 .aqi-poor {
-    border-left: 4px solid #ff7e00;
+    /* No special border or background */
 }
 
 .aqi-very-poor {
-    border-left: 4px solid #ff0000;
+    /* No special border or background */
+}
+
+.aqi-hazardous {
+    /* No special border or background */
 }
 
 /* AQI color indicators for main display */
@@ -281,39 +312,61 @@ footer {
 .aqi-fair-indicator, 
 .aqi-moderate-indicator, 
 .aqi-poor-indicator, 
-.aqi-very-poor-indicator {
+.aqi-very-poor-indicator,
+.aqi-indicator {
     display: inline-block;
-    width: 12px;
-    height: 12px;
+    width: 16px;
+    height: 16px;
     border-radius: 50%;
     margin-right: 6px;
     vertical-align: middle;
+    box-shadow: 0 0 4px rgba(0, 0, 0, 0.3);
 }
 
-.aqi-good-indicator {
+.aqi-good-indicator, .aqi-good .aqi-indicator {
     background-color: #00e400;
 }
 
-.aqi-fair-indicator {
-    background-color: #92d050;
-}
-
-.aqi-moderate-indicator {
+.aqi-moderate-indicator, .aqi-moderate .aqi-indicator {
     background-color: #ffff00;
 }
 
-.aqi-poor-indicator {
+.aqi-poor-indicator, .aqi-poor .aqi-indicator {
     background-color: #ff7e00;
 }
 
-.aqi-very-poor-indicator {
+.aqi-very-poor-indicator, .aqi-very-poor .aqi-indicator {
     background-color: #ff0000;
+}
+
+.aqi-hazardous-indicator, .aqi-hazardous .aqi-indicator {
+    background-color: #7e0023;
 }
 
 .weather-item details {
     margin-top: 10px;
     font-size: 0.85em;
     text-align: left;
+}
+
+/* AQI value styling */
+.weather-item[class*="aqi-"] p {
+    font-weight: 400;
+    font-size: 1em;
+}
+
+.weather-item[class*="aqi-"] p strong {
+    font-weight: 700;
+    font-size: 1.25em;
+}
+
+.weather-item[class*="aqi-"] i {
+    color: var(--primary-color);
+    margin-bottom: 10px;
+}
+
+.weather-item[class*="aqi-"] {
+    /* Use regular styling like other cards */
 }
 
 .weather-item details summary {
