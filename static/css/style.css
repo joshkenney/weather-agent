@@ -227,6 +227,53 @@ footer {
     background-color: rgba(189, 195, 199, 0.2);
 }
 
+.condition-haze {
+    background-color: rgba(229, 152, 102, 0.1);
+}
+
+.condition-dust {
+    background-color: rgba(210, 180, 140, 0.2);
+}
+
+/* AQI specific styles */
+.aqi-good {
+    border-left: 4px solid #00e400;
+}
+
+.aqi-fair {
+    border-left: 4px solid #92d050;
+}
+
+.aqi-moderate {
+    border-left: 4px solid #ffff00;
+}
+
+.aqi-poor {
+    border-left: 4px solid #ff7e00;
+}
+
+.aqi-very-poor {
+    border-left: 4px solid #ff0000;
+}
+
+.weather-item details {
+    margin-top: 10px;
+    font-size: 0.85em;
+    text-align: left;
+}
+
+.weather-item details summary {
+    cursor: pointer;
+    color: var(--primary-color);
+    font-weight: 600;
+}
+
+.weather-item details p {
+    padding: 8px 0;
+    font-size: 0.95em;
+    font-weight: normal;
+}
+
 /* Animation for refresh icon */
 @keyframes spin {
     0% {

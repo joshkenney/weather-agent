@@ -304,6 +304,10 @@ function updateWeatherMessage(message) {
     weatherMessage.classList.add("condition-thunderstorm");
   } else if (messageText.includes("fog") || messageText.includes("mist")) {
     weatherMessage.classList.add("condition-fog");
+  } else if (messageText.includes("haze") || messageText.includes("smoke") || messageText.includes("pollution")) {
+    weatherMessage.classList.add("condition-haze");
+  } else if (messageText.includes("dust") || messageText.includes("sand")) {
+    weatherMessage.classList.add("condition-dust");
   }
 }
 
@@ -344,10 +348,19 @@ function updateWeatherDetails(data) {
     },
     { key: "condition", label: "Condition", icon: "fa-cloud" },
     { key: "humidity", label: "Humidity", icon: "fa-tint", suffix: "%" },
-    { key: "pressure", label: "Pressure", icon: "fa-compress-alt" },
+    { key: "pressure", label: "Pressure", icon: "fa-compress" },
     { key: "wind_speed", label: "Wind", icon: "fa-wind" },
     { key: "cloud_cover", label: "Cloud Cover", icon: "fa-cloud" },
     { key: "visibility", label: "Visibility", icon: "fa-eye" },
+    { 
+      key: "aqi", 
+      label: "Air Quality", 
+      icon: "fa-wind", 
+      optional: true,
+      formatter: function(value) {
+        return `AQI ${value}`;
+      }
+    },
     { key: "time", label: "Local Time", icon: "fa-clock" },
   ];
 
@@ -364,7 +377,11 @@ function updateWeatherDetails(data) {
 
       // Format the value if needed
       let value = data.data[item.key];
-      if (item.suffix) {
+      
+      // Use formatter function if provided
+      if (item.formatter && typeof item.formatter === 'function') {
+        value = item.formatter(value);
+      } else if (item.suffix) {
         // If the value already includes the suffix, don't add it again
         if (!value.toString().includes(item.suffix)) {
           value = value + item.suffix;
@@ -446,6 +463,48 @@ function updateWeatherDetails(data) {
         `;
     weatherDetails.appendChild(div);
   }
+  
+  // Add detailed AQI information if available
+  if (data.data.aqi && data.data.aqi_description) {
+    const div = document.createElement("div");
+    div.className = "weather-item";
+    
+    // Style based on AQI value
+    let aqiClass = "";
+    switch(parseInt(data.data.aqi)) {
+      case 1: aqiClass = "aqi-good"; break;
+      case 2: aqiClass = "aqi-fair"; break;
+      case 3: aqiClass = "aqi-moderate"; break;
+      case 4: aqiClass = "aqi-poor"; break;
+      case 5: aqiClass = "aqi-very-poor"; break;
+    }
+    
+    if (aqiClass) {
+      div.classList.add(aqiClass);
+    }
+    
+    // Create pollutant details if available
+    let pollutantDetails = "";
+    if (data.data.pm2_5) pollutantDetails += `PM2.5: ${data.data.pm2_5}<br>`;
+    if (data.data.pm10) pollutantDetails += `PM10: ${data.data.pm10}<br>`;
+    if (data.data.o3) pollutantDetails += `O₃: ${data.data.o3}<br>`;
+    if (data.data.no2) pollutantDetails += `NO₂: ${data.data.no2}`;
+    
+    let aqiContent = data.data.aqi_description;
+    if (pollutantDetails) {
+      aqiContent += `<br><details>
+        <summary>Pollutant Details</summary>
+        <p>${pollutantDetails}</p>
+      </details>`;
+    }
+    
+    div.innerHTML = `
+            <i class="fas fa-wind"></i>
+            <h3>Air Quality</h3>
+            <p>${aqiContent}</p>
+        `;
+    weatherDetails.appendChild(div);
+  }
 }
 
 function getWeatherIcon(condition) {
@@ -468,6 +527,10 @@ function getWeatherIcon(condition) {
   } else if (condition.includes("thunder")) {
     return "fa-bolt";
   } else if (condition.includes("fog") || condition.includes("mist")) {
+    return "fa-smog";
+  } else if (condition.includes("dust") || condition.includes("sand")) {
+    return "fa-wind";
+  } else if (condition.includes("smoke") || condition.includes("haze")) {
     return "fa-smog";
   } else {
     return "fa-cloud";

@@ -74,6 +74,23 @@ type WeatherResponse struct {
 	Timezone int   `json:"timezone"` // Timezone offset in seconds
 	Dt       int64 `json:"dt"`       // Time of data calculation, unix
 	IsDay    int   `json:"is_day"`   // 1 for day, 0 for night
+	AQI      struct {
+		List []struct {
+			Main struct {
+				AQI int `json:"aqi"` // Air Quality Index
+			} `json:"main"`
+			Components struct {
+				CO    float64 `json:"co"`    // Carbon monoxide (μg/m3)
+				NO    float64 `json:"no"`    // Nitrogen monoxide (μg/m3)
+				NO2   float64 `json:"no2"`   // Nitrogen dioxide (μg/m3)
+				O3    float64 `json:"o3"`    // Ozone (μg/m3)
+				SO2   float64 `json:"so2"`   // Sulphur dioxide (μg/m3)
+				PM2_5 float64 `json:"pm2_5"` // Fine particles (μg/m3)
+				PM10  float64 `json:"pm10"`  // Coarse particles (μg/m3)
+				NH3   float64 `json:"nh3"`   // Ammonia (μg/m3)
+			} `json:"components"`
+		} `json:"list"`
+	} `json:"aqi,omitempty"` // Air Quality data
 }
 
 // Anthropic API structures
@@ -397,6 +414,48 @@ func (agent *WeatherAgent) fetchWeather() (WeatherResponse, error) {
 			agent.logger.Printf("It is currently daytime at the location")
 		} else {
 			agent.logger.Printf("It is currently nighttime at the location")
+		}
+	}
+
+	// Now fetch Air Quality data if coordinates are available
+	aqiURL := fmt.Sprintf("https://api.openweathermap.org/data/2.5/air_pollution?lat=%f&lon=%f&appid=%s",
+		lat, lon, agent.config.WeatherAPIKey)
+	
+	aqiResp, err := http.Get(aqiURL)
+	if err != nil {
+		agent.logger.Printf("Warning: Failed to fetch AQI data: %v", err)
+		// Continue without AQI data, don't return an error
+	} else {
+		defer aqiResp.Body.Close()
+		
+		if aqiResp.StatusCode == http.StatusOK {
+			var aqiData struct {
+				List []struct {
+					Main struct {
+						AQI int `json:"aqi"`
+					} `json:"main"`
+					Components struct {
+						CO    float64 `json:"co"`
+						NO    float64 `json:"no"`
+						NO2   float64 `json:"no2"`
+						O3    float64 `json:"o3"`
+						SO2   float64 `json:"so2"`
+						PM2_5 float64 `json:"pm2_5"`
+						PM10  float64 `json:"pm10"`
+						NH3   float64 `json:"nh3"`
+					} `json:"components"`
+				} `json:"list"`
+			}
+			
+			if err := json.NewDecoder(aqiResp.Body).Decode(&aqiData); err != nil {
+				agent.logger.Printf("Warning: Failed to decode AQI data: %v", err)
+			} else if len(aqiData.List) > 0 {
+				// Add AQI data to the weather response
+				weather.AQI.List = aqiData.List
+				agent.logger.Printf("Successfully added AQI data: %+v", aqiData.List[0])
+			}
+		} else {
+			agent.logger.Printf("Warning: AQI API returned status %d", aqiResp.StatusCode)
 		}
 	}
 
@@ -805,6 +864,24 @@ func (agent *WeatherAgent) getWindUnit() string {
 // Update prepareWeatherData to include day/night information
 // Modify the prepareWeatherData method to fix the time display
 // Modify the prepareWeatherData method to be extremely explicit about time
+// Helper function to get AQI description based on value
+func getAQIDescription(aqi int) string {
+	switch aqi {
+	case 1:
+		return "Good (1): Air quality is considered satisfactory, and air pollution poses little or no risk."
+	case 2:
+		return "Fair (2): Air quality is acceptable; however, for some pollutants there may be a moderate health concern for a very small number of people."
+	case 3:
+		return "Moderate (3): Members of sensitive groups may experience health effects. The general public is not likely to be affected."
+	case 4:
+		return "Poor (4): Everyone may begin to experience health effects; members of sensitive groups may experience more serious health effects."
+	case 5:
+		return "Very Poor (5): Health warnings of emergency conditions. The entire population is more likely to be affected."
+	default:
+		return fmt.Sprintf("Unknown AQI value: %d", aqi)
+	}
+}
+
 func (agent *WeatherAgent) prepareWeatherData(weather WeatherResponse) map[string]interface{} {
 	// Create the timezone for the location
 	locationTimezone := time.FixedZone("Local", weather.Timezone)
@@ -930,21 +1007,30 @@ func (agent *WeatherAgent) prepareWeatherData(weather WeatherResponse) map[strin
 	
 	// Format visibility
 	visibilityStr := "Unknown"
+	// Debug visibility value
+	agent.logger.Printf("DEBUG: Visibility value from API: %d meters", weather.Visibility)
+	
 	// OpenWeatherMap returns visibility in meters, and 10000 is their default maximum
-	if weather.Visibility > 0 {
+	// Visibility might not be in the response or might be 0, default to a reasonable value
+	// when it's missing or invalid
+	if weather.Visibility <= 0 {
+		agent.logger.Printf("WARNING: Visibility is missing, zero or negative: %d - using default value", weather.Visibility)
+		// Set a default visibility value (assuming good visibility) if missing
+		weather.Visibility = 10000
+	}
+	
+	if agent.config.Units == "metric" {
+		visibilityStr = fmt.Sprintf("%.1f km", float64(weather.Visibility)/1000)
+	} else {
+		visibilityStr = fmt.Sprintf("%.1f miles", float64(weather.Visibility)/1609.34)
+	}
+	
+	// If the visibility is at the API's default maximum (10000 meters)
+	if weather.Visibility == 10000 {
 		if agent.config.Units == "metric" {
-			visibilityStr = fmt.Sprintf("%.1f km", float64(weather.Visibility)/1000)
+			visibilityStr = "10+ km (excellent)"
 		} else {
-			visibilityStr = fmt.Sprintf("%.1f miles", float64(weather.Visibility)/1609.34)
-		}
-		
-		// If the visibility is at the API's default maximum (10000 meters)
-		if weather.Visibility == 10000 {
-			if agent.config.Units == "metric" {
-				visibilityStr = "10+ km (excellent)"
-			} else {
-				visibilityStr = "6.2+ miles (excellent)"
-			}
+			visibilityStr = "6.2+ miles (excellent)"
 		}
 	}
 
@@ -984,6 +1070,31 @@ func (agent *WeatherAgent) prepareWeatherData(weather WeatherResponse) map[strin
 		"is_daytime":            isDaytime,
 		"timezone_offset_hours": weather.Timezone / 3600,
 		"timezone_name":         fmt.Sprintf("UTC%+d", weather.Timezone/3600),
+	}
+	
+	// Log raw visibility value from API for debugging
+	agent.logger.Printf("Raw visibility value from API response: %d meters", weather.Visibility)
+	
+	// Add AQI data if available
+	if len(weather.AQI.List) > 0 {
+		aqiValue := weather.AQI.List[0].Main.AQI
+		aqiDesc := getAQIDescription(aqiValue)
+		
+		data["aqi"] = aqiValue
+		data["aqi_description"] = aqiDesc
+		
+		// Add individual pollutant data
+		components := weather.AQI.List[0].Components
+		data["co"] = fmt.Sprintf("%.1f μg/m³", components.CO)
+		data["no2"] = fmt.Sprintf("%.1f μg/m³", components.NO2)
+		data["o3"] = fmt.Sprintf("%.1f μg/m³", components.O3)
+		data["so2"] = fmt.Sprintf("%.1f μg/m³", components.SO2)
+		data["pm2_5"] = fmt.Sprintf("%.1f μg/m³", components.PM2_5)
+		data["pm10"] = fmt.Sprintf("%.1f μg/m³", components.PM10)
+		
+		agent.logger.Printf("Added AQI data: %d (%s)", aqiValue, aqiDesc)
+	} else {
+		agent.logger.Printf("No AQI data available")
 	}
 	
 	// Add heat index if calculated
@@ -1072,12 +1183,15 @@ You MUST use this exact time in your weather message.
 	}
 
 	// Add VERY explicit instruction for what kind of response we want
+	// Add this to the LLM prompt to make sure the correct units are used
 	userMessage += fmt.Sprintf(`
 Based on this weather data, generate a helpful, informative, and engaging message about the current weather. Make it natural and conversational.
 
-Consider all the weather details provided, such as temperature, humidity, wind, precipitation, visibility, cloud cover, and astronomical information when relevant. If there are any notable weather conditions (extreme temperatures, storms, etc.), highlight those.
+Consider all the weather details provided, such as temperature, humidity, wind, precipitation, visibility, cloud cover, air quality, and astronomical information when relevant. If there are any notable weather conditions (extreme temperatures, storms, poor air quality, etc.), highlight those.
 
 You can mention interesting weather facts or patterns if they're relevant to the current conditions. For example, if it's a full moon on a clear night, or if it's an unusually warm/cold day for the season.
+
+If air quality information is provided, include health recommendations based on the AQI level.
 
 CRITICAL: The current local time in %s is %s. DO NOT modify or reinterpret this time. Reference this EXACT time in your response.`, currentWeather.Name, time12h)
 
