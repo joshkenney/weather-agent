@@ -20,8 +20,8 @@ document.addEventListener("DOMContentLoaded", function () {
     // Track last update timestamp to detect changes
     let lastUpdateTimestamp = "";
 
-    // Fetch weather data when page loads only
-    fetchWeatherData();
+    // Try to get user's location first, then fetch weather data
+    detectLocation();
 
     // Set up manual refresh button if it exists
     const refreshButton = document.getElementById("refreshButton");
@@ -36,8 +36,8 @@ document.addEventListener("DOMContentLoaded", function () {
             // Disable button during refresh
             refreshButton.disabled = true;
 
-            // Force refresh (don't check timestamp)
-            fetchWeatherData(false).finally(() => {
+            // Force refresh with location detection
+            detectLocation().finally(() => {
                 // Re-enable button and remove animation when done
                 setTimeout(() => {
                     if (icon) {
@@ -120,6 +120,137 @@ document.addEventListener("DOMContentLoaded", function () {
                 </div>
             `;
         }
+    }
+
+    // Detect user location using geolocation API
+    function detectLocation() {
+        return new Promise((resolve, reject) => {
+            if (!navigator.geolocation) {
+                console.log(
+                    "Geolocation is not supported by this browser. Using default location."
+                );
+                fetchWeatherData().then(resolve).catch(reject);
+                return;
+            }
+
+            // Show location detection message
+            showLocationDetectionState();
+
+            const geoOptions = {
+                timeout: 10000, // 10 seconds timeout
+                maximumAge: 300000, // Cache for 5 minutes
+                enableHighAccuracy: false, // Don't need high accuracy for weather
+            };
+
+            navigator.geolocation.getCurrentPosition(
+                // Success callback
+                function (position) {
+                    const lat = position.coords.latitude;
+                    const lon = position.coords.longitude;
+                    console.log(`Location detected: ${lat}, ${lon}`);
+                    fetchWeatherDataByCoordinates(lat, lon)
+                        .then(resolve)
+                        .catch(reject);
+                },
+                // Error callback
+                function (error) {
+                    console.log("Geolocation error:", error.message);
+                    showLocationError(error);
+                    // Fall back to default location
+                    setTimeout(() => {
+                        fetchWeatherData().then(resolve).catch(reject);
+                    }, 2000);
+                },
+                geoOptions
+            );
+        });
+    }
+
+    // Show location detection state
+    function showLocationDetectionState() {
+        const weatherMessage = document.getElementById("weatherMessage");
+        const weatherDetails = document.getElementById("weatherDetails");
+
+        if (weatherMessage) {
+            weatherMessage.innerHTML = `
+                <p class="loading-message">
+                    <i class="fas fa-map-marker-alt fa-pulse"></i>
+                    Detecting your location...
+                </p>
+            `;
+        }
+
+        if (weatherDetails) {
+            weatherDetails.innerHTML = `
+                <div class="loading">
+                    <i class="fas fa-compass fa-spin"></i>
+                    Finding where you are...
+                </div>
+            `;
+        }
+    }
+
+    // Show location detection error
+    function showLocationError(error) {
+        const weatherMessage = document.getElementById("weatherMessage");
+
+        if (weatherMessage) {
+            let errorMsg = "Location detection failed. Using default location.";
+
+            switch (error.code) {
+                case error.PERMISSION_DENIED:
+                    errorMsg =
+                        "Location access denied. Using default location.";
+                    break;
+                case error.POSITION_UNAVAILABLE:
+                    errorMsg = "Location unavailable. Using default location.";
+                    break;
+                case error.TIMEOUT:
+                    errorMsg =
+                        "Location detection timed out. Using default location.";
+                    break;
+            }
+
+            weatherMessage.innerHTML = `
+                <p class="error-message">
+                    <i class="fas fa-exclamation-triangle"></i>
+                    ${errorMsg}
+                </p>
+            `;
+        }
+    }
+
+    // Fetch weather data using coordinates
+    function fetchWeatherDataByCoordinates(lat, lon) {
+        showLoadingState();
+
+        return fetch(`/api/weather?lat=${lat}&lon=${lon}`)
+            .then((response) => {
+                if (!response.ok) {
+                    throw new Error("Network response was not ok");
+                }
+                return response.json();
+            })
+            .then((data) => {
+                console.log("Weather data received for detected location");
+                updateWeatherDetails(data);
+                updateWeatherMessage(data.message);
+                updatePageTitle(data.city, data.country);
+                updateTimestamp(data.timestamp);
+                lastUpdateTimestamp = data.timestamp;
+                flashRefreshIndicator();
+            })
+            .catch((error) => {
+                console.error(
+                    "Error fetching weather data by coordinates:",
+                    error
+                );
+                const weatherDetails =
+                    document.getElementById("weatherDetails");
+                if (weatherDetails) {
+                    weatherDetails.innerHTML = `<div class="error">Error loading weather data: ${error.message}</div>`;
+                }
+            });
     }
 });
 
@@ -298,12 +429,18 @@ function getWeatherIcon(condition) {
 
 function updatePageTitle(city, country) {
     if (city && country) {
-        document.title = `Weather in ${city}, ${country}`;
+        // Update both the browser title and the page header
+        document.title = `Weather Agent - ${city}, ${country}`;
+
+        const pageTitle = document.getElementById("pageTitle");
+        if (pageTitle) {
+            pageTitle.textContent = `Weather in ${city}, ${country}`;
+        }
     }
 }
 
 function updateTimestamp(timestamp) {
-    const timestampElement = document.querySelector(".timestamp");
+    const timestampElement = document.getElementById("lastUpdated");
     if (timestampElement && timestamp) {
         timestampElement.textContent = `Last updated: ${timestamp}`;
     }

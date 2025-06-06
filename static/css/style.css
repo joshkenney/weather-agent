@@ -255,6 +255,19 @@ footer {
     color: var(--accent-color);
 }
 
+.error-message {
+    color: var(--accent-color);
+    font-style: italic;
+    text-align: center;
+    padding: 20px;
+    font-size: 1.1em;
+}
+
+.error-message i {
+    margin-right: 8px;
+    color: var(--accent-color);
+}
+
 .loading i {
     margin-right: 8px;
     color: var(--primary-color);
