@@ -3,15 +3,15 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Weather Agent - {{.City}}, {{.Country}}</title>
+    <title>Weather Agent - Loading...</title>
     <link rel="stylesheet" href="/static/css/style.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
 </head>
 <body>
     <div class="container">
         <header>
-            <h1>Weather in {{.City}}, {{.Country}}</h1>
-            <p class="timestamp">Last updated: {{.Timestamp}}</p>
+            <h1 id="pageTitle">Weather Agent</h1>
+            <p class="timestamp" id="lastUpdated">Detecting location...</p>
             
             <!-- <div class="location-form">
                 <form action="/api/update-city" method="POST">

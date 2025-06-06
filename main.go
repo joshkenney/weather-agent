@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -400,6 +401,315 @@ func (agent *WeatherAgent) fetchWeather() (WeatherResponse, error) {
 	}
 
 	return weather, nil
+}
+
+// Fetch weather data using coordinates directly (for geolocation)
+func (agent *WeatherAgent) fetchWeatherByCoordinates(lat, lon float64) (WeatherResponse, error) {
+	// Get the temperature_unit parameter based on config
+	tempUnit := "celsius"
+	windUnit := "kmh"
+	if agent.config.Units == "imperial" {
+		tempUnit = "fahrenheit"
+		windUnit = "mph"
+	}
+
+	// Use Open-Meteo API with coordinates directly
+	url := fmt.Sprintf("https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f&current=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,cloud_cover,wind_speed_10m,wind_direction_10m,is_day&temperature_unit=%s&windspeed_unit=%s&timezone=auto",
+		lat, lon, tempUnit, windUnit)
+
+	resp, err := http.Get(url)
+	if err != nil {
+		return WeatherResponse{}, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return WeatherResponse{}, fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	// Parse Open-Meteo response with timezone information
+	var openMeteoResp struct {
+		Current struct {
+			Temperature      float64 `json:"temperature_2m"`
+			ApparentTemp     float64 `json:"apparent_temperature"`
+			RelativeHumidity int     `json:"relative_humidity_2m"`
+			Precipitation    float64 `json:"precipitation"`
+			WeatherCode      int     `json:"weather_code"`
+			CloudCover       int     `json:"cloud_cover"`
+			WindSpeed        float64 `json:"wind_speed_10m"`
+			WindDirection    int     `json:"wind_direction_10m"`
+			Time             string  `json:"time"`
+			IsDay            int     `json:"is_day"` // 1 for day, 0 for night
+		} `json:"current"`
+		CurrentUnits struct {
+			Temperature string `json:"temperature_2m"`
+			WindSpeed   string `json:"wind_speed_10m"`
+		} `json:"current_units"`
+		Timezone       string `json:"timezone"`
+		TimezoneAbbr   string `json:"timezone_abbreviation"`
+		TimezoneOffset int    `json:"utc_offset_seconds"`
+	}
+
+	err = json.NewDecoder(resp.Body).Decode(&openMeteoResp)
+	if err != nil {
+		return WeatherResponse{}, err
+	}
+
+	// Parse the local time from the API response and apply timezone
+	// Open-Meteo returns time in local timezone, but Go parses it as if it's in server timezone
+	// We need to create the proper timezone location first
+
+	// Create a fixed offset timezone based on the API's timezone offset
+	locationTimezone := time.FixedZone("Local", openMeteoResp.TimezoneOffset)
+
+	var localTime time.Time
+	timeFormats := []string{
+		time.RFC3339,       // Try full RFC3339 format first: "2006-01-02T15:04:05Z07:00"
+		"2006-01-02T15:04", // Try format without seconds: "2006-01-02T15:04"
+		"2006-01-02 15:04", // Try alternative format
+	}
+
+	var parseErr error
+	for _, format := range timeFormats {
+		// Parse the time and interpret it as being in the location's timezone
+		parsedTime, err := time.Parse(format, openMeteoResp.Current.Time)
+		if err == nil {
+			// Convert the parsed time to be in the correct timezone
+			localTime = time.Date(
+				parsedTime.Year(), parsedTime.Month(), parsedTime.Day(),
+				parsedTime.Hour(), parsedTime.Minute(), parsedTime.Second(),
+				parsedTime.Nanosecond(), locationTimezone)
+			parseErr = nil
+			break
+		}
+		parseErr = err
+	}
+
+	if parseErr != nil {
+		// Fall back to current time if parsing fails
+		localTime = time.Now().In(locationTimezone)
+		agent.logger.Printf("Failed to parse time from API: %v (time string: '%s'). Using current time.",
+			parseErr, openMeteoResp.Current.Time)
+	}
+
+	// Try to get city name from coordinates using reverse geocoding
+	cityName, countryCode := agent.reverseGeocode(lat, lon)
+
+	// Convert to our standard WeatherResponse format
+	weather := WeatherResponse{
+		Weather: []struct {
+			ID          int    `json:"id"`
+			Main        string `json:"main"`
+			Description string `json:"description"`
+			Icon        string `json:"icon"`
+		}{
+			{
+				ID:          openMeteoResp.Current.WeatherCode,
+				Main:        agent.weatherCodeToCondition(openMeteoResp.Current.WeatherCode),
+				Description: agent.weatherCodeToDescription(openMeteoResp.Current.WeatherCode),
+				Icon:        "",
+			},
+		},
+		Main: struct {
+			Temp      float64 `json:"temp"`
+			FeelsLike float64 `json:"feels_like"`
+			TempMin   float64 `json:"temp_min"`
+			TempMax   float64 `json:"temp_max"`
+			Pressure  int     `json:"pressure"`
+			Humidity  int     `json:"humidity"`
+		}{
+			Temp:      openMeteoResp.Current.Temperature,
+			FeelsLike: openMeteoResp.Current.ApparentTemp,
+			Humidity:  openMeteoResp.Current.RelativeHumidity,
+		},
+		Wind: struct {
+			Speed float64 `json:"speed"`
+			Deg   int     `json:"deg"`
+			Gust  float64 `json:"gust"`
+		}{
+			Speed: openMeteoResp.Current.WindSpeed,
+			Deg:   openMeteoResp.Current.WindDirection,
+		},
+		Clouds: struct {
+			All int `json:"all"`
+		}{
+			All: openMeteoResp.Current.CloudCover,
+		},
+		Name: cityName,
+		Sys: struct {
+			Country string `json:"country"`
+			Sunrise int64  `json:"sunrise"`
+			Sunset  int64  `json:"sunset"`
+		}{
+			Country: countryCode,
+		},
+		Dt:       localTime.Unix(),             // Time in correct timezone
+		Timezone: openMeteoResp.TimezoneOffset, // Store timezone offset for reference
+	}
+
+	// Debug timezone information
+	agent.logger.Printf("Location timezone: %s (%s), offset: %d seconds",
+		openMeteoResp.Timezone, openMeteoResp.TimezoneAbbr, openMeteoResp.TimezoneOffset)
+	agent.logger.Printf("Local time at location: %s (is_day: %d)",
+		localTime.Format(time.RFC3339), openMeteoResp.Current.IsDay)
+
+	return weather, nil
+}
+
+// Reverse geocode coordinates to get city name with multiple fallbacks
+func (agent *WeatherAgent) reverseGeocode(lat, lon float64) (string, string) {
+	// Try multiple geocoding services for better reliability
+
+	// Method 1: Try BigDataCloud (no API key required, good for coordinates)
+	cityName, countryCode := agent.tryBigDataCloudGeocode(lat, lon)
+	if cityName != "" && !strings.Contains(cityName, "Location") {
+		return cityName, countryCode
+	}
+
+	// Method 2: Try Nominatim as fallback
+	cityName, countryCode = agent.tryNominatimGeocode(lat, lon)
+	if cityName != "" && !strings.Contains(cityName, "Location") {
+		return cityName, countryCode
+	}
+
+	// Method 3: Simple coordinate-based city guessing for known areas
+	cityName, countryCode = agent.guessLocationFromCoordinates(lat, lon)
+
+	return cityName, countryCode
+}
+
+// Try BigDataCloud reverse geocoding (more reliable)
+func (agent *WeatherAgent) tryBigDataCloudGeocode(lat, lon float64) (string, string) {
+	geocodeURL := fmt.Sprintf("https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=%.6f&longitude=%.6f&localityLanguage=en", lat, lon)
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(geocodeURL)
+	if err != nil {
+		agent.logger.Printf("BigDataCloud geocoding failed: %v", err)
+		return "", ""
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return "", ""
+	}
+
+	var geocodeResp struct {
+		City        string `json:"city"`
+		Locality    string `json:"locality"`
+		CountryCode string `json:"countryCode"`
+		CountryName string `json:"countryName"`
+	}
+
+	err = json.NewDecoder(resp.Body).Decode(&geocodeResp)
+	if err != nil {
+		return "", ""
+	}
+
+	cityName := geocodeResp.City
+	if cityName == "" {
+		cityName = geocodeResp.Locality
+	}
+
+	if cityName != "" {
+		agent.logger.Printf("BigDataCloud geocoded: %s, %s", cityName, geocodeResp.CountryName)
+		return cityName, strings.ToUpper(geocodeResp.CountryCode)
+	}
+
+	return "", ""
+}
+
+// Try Nominatim with better error handling
+func (agent *WeatherAgent) tryNominatimGeocode(lat, lon float64) (string, string) {
+	geocodeURL := fmt.Sprintf("https://nominatim.openstreetmap.org/reverse?format=json&lat=%.6f&lon=%.6f&zoom=10&addressdetails=1", lat, lon)
+
+	req, err := http.NewRequest("GET", geocodeURL, nil)
+	if err != nil {
+		return "", ""
+	}
+	req.Header.Set("User-Agent", "WeatherAgent/1.0 (+https://github.com/yourname/weather-agent)")
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", ""
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return "", ""
+	}
+
+	var geocodeResp struct {
+		Address struct {
+			City         string `json:"city"`
+			Town         string `json:"town"`
+			Village      string `json:"village"`
+			Municipality string `json:"municipality"`
+			County       string `json:"county"`
+			CountryCode  string `json:"country_code"`
+		} `json:"address"`
+	}
+
+	err = json.NewDecoder(resp.Body).Decode(&geocodeResp)
+	if err != nil {
+		return "", ""
+	}
+
+	cityName := ""
+	if geocodeResp.Address.City != "" {
+		cityName = geocodeResp.Address.City
+	} else if geocodeResp.Address.Town != "" {
+		cityName = geocodeResp.Address.Town
+	} else if geocodeResp.Address.Village != "" {
+		cityName = geocodeResp.Address.Village
+	} else if geocodeResp.Address.Municipality != "" {
+		cityName = geocodeResp.Address.Municipality
+	} else if geocodeResp.Address.County != "" {
+		cityName = geocodeResp.Address.County
+	}
+
+	if cityName != "" {
+		agent.logger.Printf("Nominatim geocoded: %s", cityName)
+		return cityName, strings.ToUpper(geocodeResp.Address.CountryCode)
+	}
+
+	return "", ""
+}
+
+// Fallback: Guess major cities from coordinates (for common locations)
+func (agent *WeatherAgent) guessLocationFromCoordinates(lat, lon float64) (string, string) {
+	// Common city coordinates (rough approximations)
+	cities := []struct {
+		name, country string
+		lat, lon      float64
+		radius        float64 // rough radius in degrees
+	}{
+		{"New York", "US", 40.7128, -74.0060, 0.5},
+		{"Los Angeles", "US", 34.0522, -118.2437, 0.5},
+		{"Chicago", "US", 41.8781, -87.6298, 0.3},
+		{"London", "GB", 51.5074, -0.1278, 0.3},
+		{"Paris", "FR", 48.8566, 2.3522, 0.3},
+		{"Tokyo", "JP", 35.6762, 139.6503, 0.5},
+		{"Sydney", "AU", -33.8688, 151.2093, 0.3},
+		{"Toronto", "CA", 43.6532, -79.3832, 0.3},
+	}
+
+	for _, city := range cities {
+		// Simple distance calculation
+		latDiff := lat - city.lat
+		lonDiff := lon - city.lon
+		distance := latDiff*latDiff + lonDiff*lonDiff
+
+		if distance < city.radius*city.radius {
+			agent.logger.Printf("Guessed location from coordinates: %s, %s", city.name, city.country)
+			return city.name, city.country
+		}
+	}
+
+	// If no match, return coordinates
+	return fmt.Sprintf("Location %.2f,%.2f", lat, lon), "Unknown"
 }
 
 // Helper function to convert Open-Meteo weather codes to conditions
@@ -1071,6 +1381,38 @@ func main() {
 		return message, currentCity, currentCountry, timeStr, weatherData, nil
 	}
 
+	// Helper function to generate weather data using coordinates instead of city name
+	generateWeatherUpdateByCoordinates := func(lat, lon float64) (string, string, string, string, map[string]interface{}, error) {
+		// Create a custom weather fetching function for coordinates
+		weather, err := agent.fetchWeatherByCoordinates(lat, lon)
+		if err != nil {
+			return "", "", "", "", nil, fmt.Errorf("error fetching weather by coordinates: %v", err)
+		}
+
+		// Add to history for context
+		agent.weatherHistory = append(agent.weatherHistory, weather)
+		if len(agent.weatherHistory) > 24 {
+			agent.weatherHistory = agent.weatherHistory[1:]
+		}
+
+		// Generate weather message
+		historyContext := agent.generateHistoryContext()
+		message, err := agent.generateLLMMessage(weather, historyContext)
+		if err != nil {
+			return "", "", "", "", nil, fmt.Errorf("error generating LLM message: %v", err)
+		}
+
+		// Prepare weather data
+		weatherData := agent.prepareWeatherData(weather)
+		timeStr := time.Now().Format(time.RFC1123)
+
+		// Log the message
+		agent.logger.Printf("[%s] Generated fresh weather message for coordinates (%.4f, %.4f): %s",
+			time.Now().Format("15:04:05"), lat, lon, message)
+
+		return message, weather.Name, weather.Sys.Country, timeStr, weatherData, nil
+	}
+
 	// Set up HTTP handlers
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		// Serve the main HTML page with loading state
@@ -1131,8 +1473,31 @@ func main() {
 
 	// API endpoint to get fresh weather data
 	http.HandleFunc("/api/weather", func(w http.ResponseWriter, r *http.Request) {
-		// Generate fresh weather data and message
-		message, city, country, timestamp, weatherData, err := generateWeatherUpdate()
+		// Check if coordinates are provided in query parameters
+		latParam := r.URL.Query().Get("lat")
+		lonParam := r.URL.Query().Get("lon")
+
+		var message, city, country, timestamp string
+		var weatherData map[string]interface{}
+		var err error
+
+		if latParam != "" && lonParam != "" {
+			// Parse coordinates
+			lat, err1 := strconv.ParseFloat(latParam, 64)
+			lon, err2 := strconv.ParseFloat(lonParam, 64)
+
+			if err1 != nil || err2 != nil {
+				http.Error(w, "Invalid coordinates", http.StatusBadRequest)
+				return
+			}
+
+			// Generate weather update using coordinates
+			message, city, country, timestamp, weatherData, err = generateWeatherUpdateByCoordinates(lat, lon)
+		} else {
+			// Generate weather update using configured city
+			message, city, country, timestamp, weatherData, err = generateWeatherUpdate()
+		}
+
 		if err != nil {
 			agent.logger.Printf("Error generating weather update: %v", err)
 			http.Error(w, "Unable to fetch weather data", http.StatusInternalServerError)
