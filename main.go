@@ -15,10 +15,14 @@ import (
 	"time"
 )
 
+// IQAir API key environment variable name
+const IQAIR_API_KEY_ENV = "IQAIR_API_KEY"
+
 // Configuration
 type Config struct {
 	WeatherAPIKey  string
 	LLMAPIKey      string
+	IQAirAPIKey    string
 	City           string
 	CountryCode    string
 	CheckInterval  int
@@ -74,6 +78,34 @@ type WeatherResponse struct {
 	Timezone int   `json:"timezone"` // Timezone offset in seconds
 	Dt       int64 `json:"dt"`       // Time of data calculation, unix
 	IsDay    int   `json:"is_day"`   // 1 for day, 0 for night
+	AQI struct {
+		List []struct {
+			Main struct {
+				AQI int `json:"aqi"` // Air Quality Index
+			} `json:"main"`
+			Components struct {
+				CO    float64 `json:"co"`    // Carbon monoxide (μg/m3)
+				NO    float64 `json:"no"`    // Nitrogen monoxide (μg/m3)
+				NO2   float64 `json:"no2"`   // Nitrogen dioxide (μg/m3)
+				O3    float64 `json:"o3"`    // Ozone (μg/m3)
+				SO2   float64 `json:"so2"`   // Sulphur dioxide (μg/m3)
+				PM2_5 float64 `json:"pm2_5"` // Fine particles (μg/m3)
+				PM10  float64 `json:"pm10"`  // Coarse particles (μg/m3)
+				NH3   float64 `json:"nh3"`   // Ammonia (μg/m3)
+			} `json:"components"`
+		} `json:"list"`
+	} `json:"aqi,omitempty"` // Air Quality data
+	
+	// Additional AQI data from IQAir
+	IQAirData struct {
+		AQI            int     `json:"aqi"`            // US AQI
+		Category       string  `json:"category"`       // Category (Good, Moderate, etc.)
+		PollutantName  string  `json:"pollutant_name"` // Main pollutant
+		PollutantValue float64 `json:"pollutant_value"`
+		PollutantUnit  string  `json:"pollutant_unit"`
+		PM25           float64 `json:"pm25"` // PM2.5 concentration
+		PM10           float64 `json:"pm10"` // PM10 concentration
+	} `json:"iqair_data,omitempty"`
 }
 
 // Anthropic API structures
@@ -397,6 +429,85 @@ func (agent *WeatherAgent) fetchWeather() (WeatherResponse, error) {
 			agent.logger.Printf("It is currently daytime at the location")
 		} else {
 			agent.logger.Printf("It is currently nighttime at the location")
+		}
+	}
+
+	// Try to fetch AQI data from IQAir if we have an API key
+	if agent.config.IQAirAPIKey != "" {
+		fmt.Printf("\n==== INITIATING IQAIR API CALL ====\n")
+		fmt.Printf("DEBUG: Using IQAir API key: %s..., length: %d\n", agent.config.IQAirAPIKey[:4], len(agent.config.IQAirAPIKey))
+		fmt.Printf("DEBUG: Coordinates: lat=%.6f, lon=%.6f\n", lat, lon)
+		agent.logger.Printf("DEBUG: Using IQAir API key: %s..., length: %d", agent.config.IQAirAPIKey[:4], len(agent.config.IQAirAPIKey))
+		
+		// Force a fresh call to the IQAir API
+		agent.fetchIQAirData(&weather, lat, lon)
+		
+		// Check if IQAir data was successfully added
+		if weather.IQAirData.AQI > 0 {
+			fmt.Printf("DEBUG: Successfully added IQAir data: AQI=%d, Category=%s\n", 
+				weather.IQAirData.AQI, weather.IQAirData.Category)
+		} else {
+			fmt.Printf("WARNING: IQAir data was not added to the weather response\n")
+		}
+	} else {
+		// Fallback to OpenWeatherMap AQI data
+		agent.logger.Printf("No IQAir API key configured, falling back to OpenWeatherMap AQI data")
+		
+		// Now fetch Air Quality data if coordinates are available
+		aqiURL := fmt.Sprintf("https://api.openweathermap.org/data/2.5/air_pollution?lat=%f&lon=%f&appid=%s",
+			lat, lon, agent.config.WeatherAPIKey)
+		
+		agent.logger.Printf("DEBUG: Fetching AQI data from URL: %s", aqiURL)
+		
+		aqiResp, err := http.Get(aqiURL)
+		if err != nil {
+			agent.logger.Printf("Warning: Failed to fetch AQI data: %v", err)
+			// Continue without AQI data, don't return an error
+		} else {
+			defer aqiResp.Body.Close()
+			agent.logger.Printf("DEBUG: AQI API response status: %d", aqiResp.StatusCode)
+			
+			if aqiResp.StatusCode == http.StatusOK {
+				var aqiData struct {
+					List []struct {
+						Main struct {
+							AQI int `json:"aqi"`
+						} `json:"main"`
+						Components struct {
+							CO    float64 `json:"co"`
+							NO    float64 `json:"no"`
+							NO2   float64 `json:"no2"`
+							O3    float64 `json:"o3"`
+							SO2   float64 `json:"so2"`
+							PM2_5 float64 `json:"pm2_5"`
+							PM10  float64 `json:"pm10"`
+							NH3   float64 `json:"nh3"`
+						} `json:"components"`
+					} `json:"list"`
+				}
+				
+				// Read the response body for logging
+				bodyBytes, _ := io.ReadAll(aqiResp.Body)
+				agent.logger.Printf("DEBUG: AQI API response body: %s", string(bodyBytes))
+				
+				// Create a new reader with the same data for decoding
+				bodyReader := bytes.NewReader(bodyBytes)
+				
+				if err := json.NewDecoder(bodyReader).Decode(&aqiData); err != nil {
+					agent.logger.Printf("Warning: Failed to decode AQI data: %v", err)
+				} else {
+					agent.logger.Printf("DEBUG: Decoded AQI data: %+v", aqiData)
+					if len(aqiData.List) > 0 {
+						// Add AQI data to the weather response
+						weather.AQI.List = aqiData.List
+						agent.logger.Printf("Successfully added AQI data: %+v", aqiData.List[0])
+					} else {
+						agent.logger.Printf("Warning: AQI data list is empty")
+					}
+				}
+			} else {
+				agent.logger.Printf("Warning: AQI API returned status %d", aqiResp.StatusCode)
+			}
 		}
 	}
 
@@ -805,6 +916,247 @@ func (agent *WeatherAgent) getWindUnit() string {
 // Update prepareWeatherData to include day/night information
 // Modify the prepareWeatherData method to fix the time display
 // Modify the prepareWeatherData method to be extremely explicit about time
+// Helper function to get AQI description based on value for OpenWeatherMap API
+func getAQIDescription(aqi int) string {
+	switch aqi {
+	case 1:
+		return "Good (1): Air quality is considered satisfactory, and air pollution poses little or no risk."
+	case 2:
+		return "Fair (2): Air quality is acceptable; however, for some pollutants there may be a moderate health concern for a very small number of people."
+	case 3:
+		return "Moderate (3): Members of sensitive groups may experience health effects. The general public is not likely to be affected."
+	case 4:
+		return "Poor (4): Everyone may begin to experience health effects; members of sensitive groups may experience more serious health effects."
+	case 5:
+		return "Very Poor (5): Health warnings of emergency conditions. The entire population is more likely to be affected."
+	default:
+		return fmt.Sprintf("Unknown AQI value: %d", aqi)
+	}
+}
+
+// Fetch air quality data from IQAir API
+func (agent *WeatherAgent) fetchIQAirData(weather *WeatherResponse, lat, lon float64) {
+	// IQAir API endpoint - add timestamp to prevent caching
+	timestamp := time.Now().UnixNano()
+	iqairURL := fmt.Sprintf("https://api.airvisual.com/v2/nearest_city?lat=%.6f&lon=%.6f&key=%s&_t=%d",
+		lat, lon, agent.config.IQAirAPIKey, timestamp)
+	
+	agent.logger.Printf("DEBUG: Fetching AQI data from IQAir: %s", strings.Replace(iqairURL, agent.config.IQAirAPIKey, "[REDACTED]", 1))
+	agent.logger.Printf("DEBUG: IQAir API key length: %d, first 4 chars: %s", len(agent.config.IQAirAPIKey), agent.config.IQAirAPIKey[:4])
+	
+	// Print directly to stdout for debugging
+	fmt.Printf("\n==== IQAIR API REQUEST ====\n")
+	fmt.Printf("DEBUG: Making IQAir API request with key: %s... (length: %d)\n", 
+		agent.config.IQAirAPIKey[:4], len(agent.config.IQAirAPIKey))
+	fmt.Printf("DEBUG: Request URL: %s\n", strings.Replace(iqairURL, agent.config.IQAirAPIKey, "[REDACTED]", 1))
+	
+	client := &http.Client{
+		Timeout: time.Second * 10,
+	}
+	req, _ := http.NewRequest("GET", iqairURL, nil)
+	req.Header.Add("User-Agent", "WeatherAgent/1.0")
+	// Disable caching
+	req.Header.Add("Cache-Control", "no-cache, no-store, must-revalidate")
+	req.Header.Add("Pragma", "no-cache")
+	
+	iqairResp, err := client.Do(req)
+	if err != nil {
+		agent.logger.Printf("WARNING: Failed to fetch IQAir data: %v", err)
+		fmt.Printf("ERROR: Failed to fetch IQAir data: %v\n", err)  // Print directly to stdout
+		return
+	}
+	defer iqairResp.Body.Close()
+	
+	statusMsg := fmt.Sprintf("DEBUG: IQAir API response status: %d", iqairResp.StatusCode)
+	agent.logger.Print(statusMsg)
+	fmt.Println(statusMsg)
+	
+	// Log all response headers for debugging
+	fmt.Println("DEBUG: IQAir API response headers:")
+	for name, values := range iqairResp.Header {
+		for _, value := range values {
+			fmt.Printf("  %s: %s\n", name, value)
+		}
+	}
+	
+	if iqairResp.StatusCode != http.StatusOK {
+		errMsg := fmt.Sprintf("WARNING: IQAir API returned status %d", iqairResp.StatusCode)
+		agent.logger.Print(errMsg)
+		fmt.Println(errMsg)
+		return
+	}
+	
+	// Read the response body for logging
+	bodyBytes, readErr := io.ReadAll(iqairResp.Body)
+	if readErr != nil {
+		errMsg := fmt.Sprintf("WARNING: Failed to read IQAir response body: %v", readErr)
+		agent.logger.Print(errMsg)
+		fmt.Println(errMsg)
+		return
+	}
+	
+	// Log response body to both logger and stdout
+	responseBody := string(bodyBytes)
+	agent.logger.Printf("DEBUG: IQAir API response body: %s", responseBody)
+	fmt.Printf("DEBUG: IQAir API response body: %s\n", responseBody)
+	
+	// Parse the IQAir response
+	var iqairResponse struct {
+		Status string `json:"status"`
+		Data   struct {
+			City     string `json:"city"`
+			State    string `json:"state"`
+			Country  string `json:"country"`
+			Location struct {
+				Type        string    `json:"type"`
+				Coordinates []float64 `json:"coordinates"`
+			} `json:"location"`
+			Current struct {
+				Weather struct {
+					Ts      string  `json:"ts"`
+					Tp      float64 `json:"tp"`
+					Pr      float64 `json:"pr"`
+					Hu      float64 `json:"hu"`
+					Ws      float64 `json:"ws"`
+					Wd      float64 `json:"wd"`
+					Ic      string  `json:"ic"`
+				} `json:"weather"`
+				Pollution struct {
+					Ts     string  `json:"ts"`
+					Aqius  int     `json:"aqius"`  // AQI value (US)
+					Mainus string  `json:"mainus"` // Main pollutant (US)
+					Aqicn  int     `json:"aqicn"`  // AQI value (China)
+					Maincn string  `json:"maincn"` // Main pollutant (China)
+					P2     float64 `json:"p2"`     // PM2.5
+					P1     float64 `json:"p1"`     // PM10
+					O3     float64 `json:"o3"`     // Ozone
+					N2     float64 `json:"n2"`     // Nitrogen dioxide
+					S2     float64 `json:"s2"`     // Sulfur dioxide
+					Co     float64 `json:"co"`     // Carbon monoxide
+				} `json:"pollution"`
+			} `json:"current"`
+		} `json:"data"`
+	}
+	
+	// Create a new reader with the same data for decoding
+	bodyReader := bytes.NewReader(bodyBytes)
+	
+	if err := json.NewDecoder(bodyReader).Decode(&iqairResponse); err != nil {
+		errMsg := fmt.Sprintf("WARNING: Failed to decode IQAir data: %v", err)
+		agent.logger.Print(errMsg)
+		fmt.Println(errMsg)
+		return
+	}
+	
+	if iqairResponse.Status != "success" {
+		errMsg := fmt.Sprintf("WARNING: IQAir API returned status %s", iqairResponse.Status)
+		agent.logger.Print(errMsg)
+		fmt.Println(errMsg)
+		return
+	}
+	
+	fmt.Println("DEBUG: Successfully parsed IQAir API response with status: success")
+	
+	// Get AQI category based on US AQI value
+	aqi := iqairResponse.Data.Current.Pollution.Aqius
+	var category string
+	switch {
+	case aqi <= 50:
+		category = "Good"
+	case aqi <= 100:
+		category = "Moderate"
+	case aqi <= 150:
+		category = "Unhealthy for Sensitive Groups"
+	case aqi <= 200:
+		category = "Unhealthy"
+	case aqi <= 300:
+		category = "Very Unhealthy"
+	default:
+		category = "Hazardous"
+	}
+	
+	// Get pollutant unit based on main pollutant
+	pollutant := iqairResponse.Data.Current.Pollution.Mainus
+	var pollutantUnit string
+	var pollutantValue float64
+	
+	switch pollutant {
+	case "p2":
+		pollutantUnit = "μg/m³"
+		pollutantValue = iqairResponse.Data.Current.Pollution.P2
+	case "p1":
+		pollutantUnit = "μg/m³"
+		pollutantValue = iqairResponse.Data.Current.Pollution.P1
+	case "o3":
+		pollutantUnit = "ppb"
+		pollutantValue = iqairResponse.Data.Current.Pollution.O3
+	case "n2":
+		pollutantUnit = "ppb"
+		pollutantValue = iqairResponse.Data.Current.Pollution.N2
+	case "s2":
+		pollutantUnit = "ppb"
+		pollutantValue = iqairResponse.Data.Current.Pollution.S2
+	case "co":
+		pollutantUnit = "ppm"
+		pollutantValue = iqairResponse.Data.Current.Pollution.Co
+	default:
+		pollutantUnit = "μg/m³"
+		pollutantValue = 0
+	}
+	
+	// Map pollutant code to human-readable name
+	var pollutantName string
+	switch pollutant {
+	case "p2":
+		pollutantName = "PM2.5"
+	case "p1":
+		pollutantName = "PM10"
+	case "o3":
+		pollutantName = "Ozone"
+	case "n2":
+		pollutantName = "Nitrogen Dioxide"
+	case "s2":
+		pollutantName = "Sulfur Dioxide"
+	case "co":
+		pollutantName = "Carbon Monoxide"
+	default:
+		pollutantName = pollutant
+	}
+	
+	// Add IQAir data to the weather response
+	weather.IQAirData = struct {
+		AQI            int     `json:"aqi"`
+		Category       string  `json:"category"`
+		PollutantName  string  `json:"pollutant_name"`
+		PollutantValue float64 `json:"pollutant_value"`
+		PollutantUnit  string  `json:"pollutant_unit"`
+		PM25           float64 `json:"pm25"`
+		PM10           float64 `json:"pm10"`
+	}{
+		AQI:            aqi,
+		Category:       category,
+		PollutantName:  pollutantName,
+		PollutantValue: pollutantValue,
+		PollutantUnit:  pollutantUnit,
+		PM25:           iqairResponse.Data.Current.Pollution.P2,
+		PM10:           iqairResponse.Data.Current.Pollution.P1,
+	}
+	
+	successMsg := fmt.Sprintf("Successfully added IQAir AQI data: %d (%s)", aqi, category)
+	agent.logger.Print(successMsg)
+	fmt.Println(successMsg)
+	fmt.Println("==== IQAIR API REQUEST COMPLETE ====\n")
+	
+	// Log to a special file just for IQAir API calls
+	logFile, err := os.OpenFile("iqair_api_calls.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err == nil {
+		defer logFile.Close()
+		timestamp := time.Now().Format(time.RFC3339)
+		logFile.WriteString(fmt.Sprintf("[%s] IQAir API call: lat=%.6f, lon=%.6f, status=%s, AQI=%d, Category=%s\n", 
+			timestamp, lat, lon, "success", aqi, category))
+	}
+}
+
 func (agent *WeatherAgent) prepareWeatherData(weather WeatherResponse) map[string]interface{} {
 	// Create the timezone for the location
 	locationTimezone := time.FixedZone("Local", weather.Timezone)
@@ -813,28 +1165,41 @@ func (agent *WeatherAgent) prepareWeatherData(weather WeatherResponse) map[strin
 
 	// Get sunrise/sunset in local time if available
 	var sunrise, sunset string
-	if weather.Sys.Sunrise > 0 {
+	var dayLength float64
+	if weather.Sys.Sunrise > 0 && weather.Sys.Sunset > 0 {
 		// Convert sunrise to location timezone
 		sunriseTime := time.Unix(weather.Sys.Sunrise, 0).In(locationTimezone)
 		sunrise = sunriseTime.Format("3:04 PM")
-	}
-	if weather.Sys.Sunset > 0 {
+		
 		// Convert sunset to location timezone
 		sunsetTime := time.Unix(weather.Sys.Sunset, 0).In(locationTimezone)
 		sunset = sunsetTime.Format("3:04 PM")
+		
+		// Calculate day length in hours and minutes
+		dayLengthSeconds := weather.Sys.Sunset - weather.Sys.Sunrise
+		dayLength = float64(dayLengthSeconds) / 3600.0
 	}
 
 	// Weather condition
 	condition := ""
 	description := ""
+	weatherId := 0
 	if len(weather.Weather) > 0 {
 		condition = weather.Weather[0].Main
 		description = weather.Weather[0].Description
+		weatherId = weather.Weather[0].ID
 	}
 
 	// Determine if it's day or night based on the time
 	hour := localTime.Hour()
 	isDaytime := hour >= 6 && hour < 20 // Simple approximation if we don't have actual sunrise/sunset
+	
+	// More accurate day/night calculation if we have sunrise/sunset
+	if weather.Sys.Sunrise > 0 && weather.Sys.Sunset > 0 {
+		currentUnix := localTime.Unix()
+		isDaytime = currentUnix >= weather.Sys.Sunrise && currentUnix < weather.Sys.Sunset
+	}
+	
 	dayNightString := "DAYTIME"
 	if !isDaytime {
 		dayNightString = "NIGHTTIME"
@@ -845,6 +1210,104 @@ func (agent *WeatherAgent) prepareWeatherData(weather WeatherResponse) map[strin
 	time24h := localTime.Format("15:04")
 	timeWithSeconds := localTime.Format("3:04:05 PM")
 	fullTimeDate := localTime.Format("Monday, January 2, 2006 at 3:04 PM")
+	
+	// Calculate moon phase (simplified approximation)
+	// Get days since new moon on Jan 6, 2000
+	daysSinceNewMoon := (localTime.Unix() - 947182440) / 86400
+	// Moon phase cycles every 29.53 days
+	moonAge := float64(daysSinceNewMoon % 30) / 29.53
+	
+	var moonPhase string
+	switch {
+	case moonAge < 0.025 || moonAge >= 0.975: // 0-2.5% or 97.5-100%
+		moonPhase = "New Moon"
+	case moonAge < 0.225: // 2.5-22.5%
+		moonPhase = "Waxing Crescent"
+	case moonAge < 0.275: // 22.5-27.5%
+		moonPhase = "First Quarter"
+	case moonAge < 0.475: // 27.5-47.5%
+		moonPhase = "Waxing Gibbous"
+	case moonAge < 0.525: // 47.5-52.5%
+		moonPhase = "Full Moon"
+	case moonAge < 0.725: // 52.5-72.5%
+		moonPhase = "Waning Gibbous"
+	case moonAge < 0.775: // 72.5-77.5%
+		moonPhase = "Last Quarter"
+	default: // 77.5-97.5%
+		moonPhase = "Waning Crescent"
+	}
+	
+	// Get wind direction as cardinal/intercardinal point
+	windDegree := float64(weather.Wind.Deg)
+	windDirection := ""
+	switch {
+	case windDegree >= 337.5 || windDegree < 22.5:
+		windDirection = "N"
+	case windDegree >= 22.5 && windDegree < 67.5:
+		windDirection = "NE"
+	case windDegree >= 67.5 && windDegree < 112.5:
+		windDirection = "E"
+	case windDegree >= 112.5 && windDegree < 157.5:
+		windDirection = "SE"
+	case windDegree >= 157.5 && windDegree < 202.5:
+		windDirection = "S"
+	case windDegree >= 202.5 && windDegree < 247.5:
+		windDirection = "SW"
+	case windDegree >= 247.5 && windDegree < 292.5:
+		windDirection = "W"
+	case windDegree >= 292.5 && windDegree < 337.5:
+		windDirection = "NW"
+	}
+	
+	// Calculate heat index if temperature > 80°F (26.7°C) and humidity > 40%
+	var heatIndex float64
+	tempF := weather.Main.Temp
+	if agent.config.Units == "metric" {
+		tempF = weather.Main.Temp*9/5 + 32 // Convert to Fahrenheit for calculation
+	}
+	if tempF > 80 && weather.Main.Humidity > 40 {
+		// Rothfusz formula
+		heatIndex = -42.379 + 2.04901523*tempF + 10.14333127*float64(weather.Main.Humidity) - 
+			0.22475541*tempF*float64(weather.Main.Humidity) - 0.00683783*tempF*tempF - 
+			0.05481717*float64(weather.Main.Humidity)*float64(weather.Main.Humidity) + 
+			0.00122874*tempF*tempF*float64(weather.Main.Humidity) + 
+			0.00085282*tempF*float64(weather.Main.Humidity)*float64(weather.Main.Humidity) - 
+			0.00000199*tempF*tempF*float64(weather.Main.Humidity)*float64(weather.Main.Humidity)
+		
+		// Convert back to Celsius if needed
+		if agent.config.Units == "metric" {
+			heatIndex = (heatIndex - 32) * 5 / 9
+		}
+	}
+	
+	// Format visibility
+	visibilityStr := "Unknown"
+	// Debug visibility value
+	agent.logger.Printf("DEBUG: Visibility value from API: %d meters", weather.Visibility)
+	
+	// OpenWeatherMap returns visibility in meters, and 10000 is their default maximum
+	// Visibility might not be in the response or might be 0, default to a reasonable value
+	// when it's missing or invalid
+	if weather.Visibility <= 0 {
+		agent.logger.Printf("WARNING: Visibility is missing, zero or negative: %d - using default value", weather.Visibility)
+		// Set a default visibility value (assuming good visibility) if missing
+		weather.Visibility = 10000
+	}
+	
+	if agent.config.Units == "metric" {
+		visibilityStr = fmt.Sprintf("%.1f km", float64(weather.Visibility)/1000)
+	} else {
+		visibilityStr = fmt.Sprintf("%.1f miles", float64(weather.Visibility)/1609.34)
+	}
+	
+	// If the visibility is at the API's default maximum (10000 meters)
+	if weather.Visibility == 10000 {
+		if agent.config.Units == "metric" {
+			visibilityStr = "10+ km (excellent)"
+		} else {
+			visibilityStr = "6.2+ miles (excellent)"
+		}
+	}
 
 	// Create a map of the current weather data
 	data := map[string]interface{}{
@@ -861,34 +1324,96 @@ func (agent *WeatherAgent) prepareWeatherData(weather WeatherResponse) map[strin
 		"date":                  localTime.Format("January 2, 2006"),
 		"temperature":           fmt.Sprintf("%.1f%s", weather.Main.Temp, agent.getTempUnit()),
 		"feels_like":            fmt.Sprintf("%.1f%s", weather.Main.FeelsLike, agent.getTempUnit()),
+		"temp_min":              fmt.Sprintf("%.1f%s", weather.Main.TempMin, agent.getTempUnit()),
+		"temp_max":              fmt.Sprintf("%.1f%s", weather.Main.TempMax, agent.getTempUnit()),
 		"condition":             condition,
 		"description":           description,
+		"weather_id":            weatherId,
 		"humidity":              weather.Main.Humidity,
+		"pressure":              fmt.Sprintf("%d hPa", weather.Main.Pressure),
 		"wind_speed":            fmt.Sprintf("%.1f %s", weather.Wind.Speed, agent.getWindUnit()),
 		"wind_direction":        weather.Wind.Deg,
-		"visibility":            weather.Visibility,
+		"wind_direction_text":   windDirection,
+		"wind_gust":             fmt.Sprintf("%.1f %s", weather.Wind.Gust, agent.getWindUnit()),
+		"visibility":            visibilityStr,
+		"cloud_cover":           fmt.Sprintf("%d%%", weather.Clouds.All),
 		"sunrise":               sunrise,
 		"sunset":                sunset,
+		"day_length":            fmt.Sprintf("%.1f hours", dayLength),
+		"moon_phase":            moonPhase,
 		"units":                 agent.config.Units,
 		"is_daytime":            isDaytime,
 		"timezone_offset_hours": weather.Timezone / 3600,
 		"timezone_name":         fmt.Sprintf("UTC%+d", weather.Timezone/3600),
 	}
+	
+	// Log raw visibility value from API for debugging
+	agent.logger.Printf("Raw visibility value from API response: %d meters", weather.Visibility)
+	
+	// Check for IQAir data first, then fall back to OpenWeatherMap AQI data
+	if weather.IQAirData.AQI > 0 {
+		agent.logger.Printf("DEBUG: Using IQAir AQI data")
+		
+		data["aqi"] = weather.IQAirData.AQI
+		data["aqi_description"] = weather.IQAirData.Category
+		data["aqi_source"] = "IQAir"
+		
+		// Add individual pollutant data
+		data["pollutant_name"] = weather.IQAirData.PollutantName
+		data["pollutant_value"] = fmt.Sprintf("%.1f %s", weather.IQAirData.PollutantValue, weather.IQAirData.PollutantUnit)
+		data["pm2_5"] = fmt.Sprintf("%.1f μg/m³", weather.IQAirData.PM25)
+		data["pm10"] = fmt.Sprintf("%.1f μg/m³", weather.IQAirData.PM10)
+		
+		agent.logger.Printf("Added IQAir AQI data: %d (%s)", weather.IQAirData.AQI, weather.IQAirData.Category)
+	} else if len(weather.AQI.List) > 0 {
+		// Fallback to OpenWeatherMap AQI data
+		agent.logger.Printf("DEBUG: Using OpenWeatherMap AQI data. AQI list length: %d", len(weather.AQI.List))
+		aqiValue := weather.AQI.List[0].Main.AQI
+		aqiDesc := getAQIDescription(aqiValue)
+		
+		data["aqi"] = aqiValue
+		data["aqi_description"] = aqiDesc
+		data["aqi_source"] = "OpenWeatherMap"
+		
+		// Add individual pollutant data
+		components := weather.AQI.List[0].Components
+		data["co"] = fmt.Sprintf("%.1f μg/m³", components.CO)
+		data["no2"] = fmt.Sprintf("%.1f μg/m³", components.NO2)
+		data["o3"] = fmt.Sprintf("%.1f μg/m³", components.O3)
+		data["so2"] = fmt.Sprintf("%.1f μg/m³", components.SO2)
+		data["pm2_5"] = fmt.Sprintf("%.1f μg/m³", components.PM2_5)
+		data["pm10"] = fmt.Sprintf("%.1f μg/m³", components.PM10)
+		
+		agent.logger.Printf("Added OpenWeatherMap AQI data: %d (%s)", aqiValue, aqiDesc)
+	} else {
+		agent.logger.Printf("No AQI data available from any source")
+	}
+	
+	// DEBUG: Print all data being sent to the frontend
+	agent.logger.Printf("DEBUG: Full weather data map being sent to frontend:")
+	for k, v := range data {
+		agent.logger.Printf("  %s: %v", k, v)
+	}
+	
+	// Add heat index if calculated
+	if heatIndex > 0 {
+		data["heat_index"] = fmt.Sprintf("%.1f%s", heatIndex, agent.getTempUnit())
+	}
 
 	// Add rain data if available
 	if weather.Rain.OneHour > 0 {
-		data["rain_1h"] = weather.Rain.OneHour
+		data["rain_1h"] = fmt.Sprintf("%.1f mm", weather.Rain.OneHour)
 	}
 	if weather.Rain.ThreeHours > 0 {
-		data["rain_3h"] = weather.Rain.ThreeHours
+		data["rain_3h"] = fmt.Sprintf("%.1f mm", weather.Rain.ThreeHours)
 	}
 
 	// Add snow data if available
 	if weather.Snow.OneHour > 0 {
-		data["snow_1h"] = weather.Snow.OneHour
+		data["snow_1h"] = fmt.Sprintf("%.1f mm", weather.Snow.OneHour)
 	}
 	if weather.Snow.ThreeHours > 0 {
-		data["snow_3h"] = weather.Snow.ThreeHours
+		data["snow_3h"] = fmt.Sprintf("%.1f mm", weather.Snow.ThreeHours)
 	}
 
 	// Time display for UI - ensure we have a time field specifically for the UI
@@ -956,8 +1481,15 @@ You MUST use this exact time in your weather message.
 	}
 
 	// Add VERY explicit instruction for what kind of response we want
+	// Add this to the LLM prompt to make sure the correct units are used
 	userMessage += fmt.Sprintf(`
 Based on this weather data, generate a helpful, informative, and engaging message about the current weather. Make it natural and conversational.
+
+Consider all the weather details provided, such as temperature, humidity, wind, precipitation, visibility, cloud cover, air quality, and astronomical information when relevant. If there are any notable weather conditions (extreme temperatures, storms, poor air quality, etc.), highlight those.
+
+You can mention interesting weather facts or patterns if they're relevant to the current conditions. For example, if it's a full moon on a clear night, or if it's an unusually warm/cold day for the season.
+
+If air quality information is provided, include health recommendations based on the AQI level.
 
 CRITICAL: The current local time in %s is %s. DO NOT modify or reinterpret this time. Reference this EXACT time in your response.`, currentWeather.Name, time12h)
 
@@ -1138,9 +1670,13 @@ func (agent *WeatherAgent) generateHistoryContext() string {
 
 // Update weather and generate new LLM message
 func (agent *WeatherAgent) update() {
+	fmt.Println("\n==== STARTING WEATHER UPDATE ====")
+	fmt.Printf("Time: %s\n", time.Now().Format(time.RFC3339))
+	
 	weather, err := agent.fetchWeather()
 	if err != nil {
 		agent.logger.Printf("Error fetching weather: %v", err)
+		fmt.Printf("Error fetching weather: %v\n", err)
 		return
 	}
 
@@ -1190,9 +1726,15 @@ func (agent *WeatherAgent) update() {
 
 // Modify the loadConfig function to remove hardcoded secrets
 func loadConfig() Config {
+	// Log available environment variables for debugging
+	fmt.Println("DEBUG: Environment variables:")
+	fmt.Printf("DEBUG: IQAIR_API_KEY set: %t\n", os.Getenv("IQAIR_API_KEY") != "")
+	fmt.Printf("DEBUG: LLM_API_KEY set: %t\n", os.Getenv("LLM_API_KEY") != "")
+	
 	config := Config{
 		WeatherAPIKey:  getEnv("WEATHER_API_KEY", "not-needed"), // Open-Meteo doesn't need an API key
 		LLMAPIKey:      getEnv("LLM_API_KEY", ""),               // Never hardcode API keys
+		IQAirAPIKey:    getEnv("IQAIR_API_KEY", ""),             // IQAir API key for air quality data
 		City:           getEnv("WEATHER_CITY", "London"),
 		CountryCode:    getEnv("WEATHER_COUNTRY", "uk"),
 		CheckInterval:  getEnvInt("WEATHER_CHECK_INTERVAL", 1),
@@ -1229,10 +1771,20 @@ func loadConfig() Config {
 
 // Add this function to help with loading secrets from a file
 func loadSecretsFromFile(filename string) {
+	fmt.Printf("DEBUG: Attempting to load secrets from file: %s\n", filename)
 	data, err := os.ReadFile(filename)
 	if err != nil {
 		// File doesn't exist or can't be read - just continue with env vars
+		fmt.Printf("DEBUG: Error loading secrets file: %v\n", err)
 		return
+	}
+	fmt.Printf("DEBUG: Successfully loaded secrets file, size: %d bytes\n", len(data))
+	
+	// Check if file contains IQAIR_API_KEY
+	if strings.Contains(string(data), "IQAIR_API_KEY") {
+		fmt.Println("DEBUG: IQAIR_API_KEY found in secrets file")
+	} else {
+		fmt.Println("WARNING: IQAIR_API_KEY not found in secrets file")
 	}
 
 	lines := strings.Split(string(data), "\n")
@@ -1253,6 +1805,9 @@ func loadSecretsFromFile(filename string) {
 		// Only set if not already set via environment
 		if os.Getenv(key) == "" {
 			os.Setenv(key, value)
+			fmt.Printf("DEBUG: Set environment variable from .env file: %s\n", key)
+		} else {
+			fmt.Printf("DEBUG: Environment variable already set: %s\n", key)
 		}
 	}
 }
@@ -1325,10 +1880,68 @@ func (agent *WeatherAgent) debugTimeInfo(weather WeatherResponse) {
 }
 
 // Modify the main function to load secrets before config
+func testIQAirAPI(apiKey string) {
+	if apiKey == "" {
+		fmt.Println("ERROR: IQAir API key is empty")
+		return
+	}
+	
+	fmt.Printf("Testing IQAir API with key: %s (length: %d)\n", apiKey[:4] + "...", len(apiKey))
+	
+	// Test with New York coordinates
+	lat, lon := 40.7128, -74.0060
+	
+	iqairURL := fmt.Sprintf("https://api.airvisual.com/v2/nearest_city?lat=%.6f&lon=%.6f&key=%s",
+		lat, lon, apiKey)
+	
+	fmt.Printf("DEBUG: IQAir API URL: %s\n", strings.Replace(iqairURL, apiKey, "[REDACTED]", 1))
+	
+	client := &http.Client{
+		Timeout: time.Second * 10,
+	}
+	
+	req, _ := http.NewRequest("GET", iqairURL, nil)
+	req.Header.Add("User-Agent", "WeatherAgent/1.0")
+	
+	fmt.Println("DEBUG: Sending request to IQAir API...")
+	
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Printf("ERROR: Failed to call IQAir API: %v\n", err)
+		return
+	}
+	defer resp.Body.Close()
+	
+	fmt.Printf("DEBUG: IQAir API response status: %d\n", resp.StatusCode)
+	
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Printf("ERROR: Failed to read response body: %v\n", err)
+		return
+	}
+	
+	fmt.Printf("DEBUG: IQAir API response body: %s\n", string(bodyBytes))
+	
+	var result map[string]interface{}
+	if err := json.Unmarshal(bodyBytes, &result); err != nil {
+		fmt.Printf("ERROR: Failed to parse JSON response: %v\n", err)
+		return
+	}
+	
+	fmt.Printf("DEBUG: Parsed response: %+v\n", result)
+}
+
 func main() {
 	// Load secrets and config as before
 	loadSecretsFromFile(".env")
 	config := loadConfig()
+
+	// Test IQAir API directly
+	fmt.Println("=====================")
+	fmt.Println("TESTING IQAIR API")
+	fmt.Println("=====================")
+	testIQAirAPI(config.IQAirAPIKey)
+	fmt.Println("=====================")
 
 	// Check for required API key
 	if config.LLMAPIKey == "" {
@@ -1473,6 +2086,11 @@ func main() {
 
 	// API endpoint to get fresh weather data
 	http.HandleFunc("/api/weather", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Printf("\n==== RECEIVED REQUEST TO /api/weather ENDPOINT ====\n")
+		fmt.Printf("Time: %s\n", time.Now().Format(time.RFC3339))
+		fmt.Printf("Remote address: %s\n", r.RemoteAddr)
+		fmt.Printf("User agent: %s\n", r.UserAgent())
+		
 		// Check if coordinates are provided in query parameters
 		latParam := r.URL.Query().Get("lat")
 		lonParam := r.URL.Query().Get("lon")
@@ -1507,6 +2125,13 @@ func main() {
 		// Debug the time data being sent to the browser
 		if weatherData != nil {
 			log.Printf("TIME DATA SENT TO BROWSER: %v", weatherData["time"])
+			
+			// Check if AQI data is present
+			if aqi, ok := weatherData["aqi"]; ok {
+				log.Printf("AQI DATA SENT TO BROWSER: %v", aqi)
+			} else {
+				log.Printf("WARNING: No AQI data found in weatherData map")
+			}
 		}
 
 		w.Header().Set("Content-Type", "application/json")
