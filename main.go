@@ -11,7 +11,6 @@ import (
 	"net/url"
 	"os"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -1032,55 +1031,45 @@ func main() {
 	// Create our AI agent
 	agent := NewWeatherAgent(config)
 
-	// Set up a global state to store the latest weather message
-	var latestWeather struct {
-		Message     string
-		City        string
-		Country     string
-		Timestamp   string
-		WeatherData map[string]interface{}
-		sync.RWMutex
-	}
+	// Helper function to generate fresh weather data and message
+	generateWeatherUpdate := func() (string, string, string, string, map[string]interface{}, error) {
+		// Get current city/country from environment (might have been updated)
+		currentCity := getEnv("WEATHER_CITY", config.City)
+		currentCountry := getEnv("WEATHER_COUNTRY", config.CountryCode)
 
-	// Start the weather update goroutine
-	go func() {
-		for {
-			// Get weather update
-			weather, err := agent.fetchWeather()
-			if err != nil {
-				agent.logger.Printf("Error fetching weather: %v", err)
-				time.Sleep(time.Duration(config.CheckInterval) * time.Minute)
-				continue
-			}
+		// Update agent config
+		agent.config.City = currentCity
+		agent.config.CountryCode = currentCountry
 
-			// Generate weather message
-			historyContext := agent.generateHistoryContext()
-			message, err := agent.generateLLMMessage(weather, historyContext)
-			if err != nil {
-				agent.logger.Printf("Error generating LLM message: %v", err)
-				time.Sleep(time.Duration(config.CheckInterval) * time.Minute)
-				continue
-			}
-
-			// Update global state with latest weather info
-			weatherData := agent.prepareWeatherData(weather)
-			timeStr := time.Now().Format(time.RFC1123)
-
-			latestWeather.Lock()
-			latestWeather.Message = message
-			latestWeather.City = config.City
-			latestWeather.Country = config.CountryCode
-			latestWeather.Timestamp = timeStr
-			latestWeather.WeatherData = weatherData
-			latestWeather.Unlock()
-
-			// Log the message as before
-			agent.logger.Printf("[%s] %s\n", time.Now().Format("15:04:05"), message)
-
-			// Wait for next update
-			time.Sleep(time.Duration(config.CheckInterval) * time.Minute)
+		// Get weather update
+		weather, err := agent.fetchWeather()
+		if err != nil {
+			return "", "", "", "", nil, fmt.Errorf("error fetching weather: %v", err)
 		}
-	}()
+
+		// Add to history for context
+		agent.weatherHistory = append(agent.weatherHistory, weather)
+		if len(agent.weatherHistory) > 24 {
+			agent.weatherHistory = agent.weatherHistory[1:]
+		}
+
+		// Generate weather message
+		historyContext := agent.generateHistoryContext()
+		message, err := agent.generateLLMMessage(weather, historyContext)
+		if err != nil {
+			return "", "", "", "", nil, fmt.Errorf("error generating LLM message: %v", err)
+		}
+
+		// Prepare weather data
+		weatherData := agent.prepareWeatherData(weather)
+		timeStr := time.Now().Format(time.RFC1123)
+
+		// Log the message
+		agent.logger.Printf("[%s] Generated fresh weather message for %s: %s",
+			time.Now().Format("15:04:05"), currentCity, message)
+
+		return message, currentCity, currentCountry, timeStr, weatherData, nil
+	}
 
 	// Set up HTTP handlers
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -1091,8 +1080,14 @@ func main() {
 			return
 		}
 
-		latestWeather.RLock()
-		defer latestWeather.RUnlock()
+		// Generate fresh weather data and message
+		message, city, country, timestamp, _, err := generateWeatherUpdate()
+		if err != nil {
+			agent.logger.Printf("Error generating weather update: %v", err)
+			// Show error page or fallback
+			http.Error(w, "Unable to fetch weather data", http.StatusInternalServerError)
+			return
+		}
 
 		data := struct {
 			City      string
@@ -1100,10 +1095,10 @@ func main() {
 			Message   string
 			Timestamp string
 		}{
-			City:      latestWeather.City,
-			Country:   latestWeather.Country,
-			Message:   latestWeather.Message,
-			Timestamp: latestWeather.Timestamp,
+			City:      city,
+			Country:   country,
+			Message:   message,
+			Timestamp: timestamp,
 		}
 
 		tmpl.Execute(w, data)
@@ -1139,24 +1134,28 @@ func main() {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 	})
 
-	// In the main HTTP handler, add debugging for the final data sent to the browser
+	// API endpoint to get fresh weather data
 	http.HandleFunc("/api/weather", func(w http.ResponseWriter, r *http.Request) {
-		// Serve the weather data as JSON for AJAX requests
-		latestWeather.RLock()
-		defer latestWeather.RUnlock()
+		// Generate fresh weather data and message
+		message, city, country, timestamp, weatherData, err := generateWeatherUpdate()
+		if err != nil {
+			agent.logger.Printf("Error generating weather update: %v", err)
+			http.Error(w, "Unable to fetch weather data", http.StatusInternalServerError)
+			return
+		}
 
 		// Debug the time data being sent to the browser
-		if latestWeather.WeatherData != nil {
-			log.Printf("TIME DATA SENT TO BROWSER: %v", latestWeather.WeatherData["time"])
+		if weatherData != nil {
+			log.Printf("TIME DATA SENT TO BROWSER: %v", weatherData["time"])
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"city":      latestWeather.City,
-			"country":   latestWeather.Country,
-			"message":   latestWeather.Message,
-			"timestamp": latestWeather.Timestamp,
-			"data":      latestWeather.WeatherData,
+			"city":      city,
+			"country":   country,
+			"message":   message,
+			"timestamp": timestamp,
+			"data":      weatherData,
 		})
 	})
 
